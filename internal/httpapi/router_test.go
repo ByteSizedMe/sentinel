@@ -23,7 +23,7 @@ func TestRoutes(t *testing.T) {
 		{"unknown path", http.MethodGet, "/nope", http.StatusNotFound, ""},
 	}
 
-	h := NewRouter()
+	h := NewRouter(newFakeStore())
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
