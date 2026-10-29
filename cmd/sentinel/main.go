@@ -13,6 +13,7 @@ import (
 
 	"github.com/bytesizedme/sentinel/internal/config"
 	"github.com/bytesizedme/sentinel/internal/httpapi"
+	"github.com/bytesizedme/sentinel/internal/store"
 )
 
 func main() {
@@ -29,9 +30,16 @@ func run() error {
 		return err
 	}
 
+	// Connect to Postgres. Migrations are NOT run here; use `make migrate-up`.
+	pool, err := store.Connect(context.Background(), cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
 	srv := &http.Server{
 		Addr:    cfg.Addr,
-		Handler: httpapi.NewRouter(),
+		Handler: httpapi.NewRouter(store.NewPostgres(pool)),
 		// Timeouts stop slow or malicious clients from holding connections
 		// open forever (e.g. the "slowloris" attack).
 		ReadHeaderTimeout: 5 * time.Second,
