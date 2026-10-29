@@ -1,0 +1,17 @@
+# Secrets: only .env.example is committed
+.env
+.env.*
+!.env.example
+
+# Build output
+/bin/
+*.exe
+*.test
+*.out
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
