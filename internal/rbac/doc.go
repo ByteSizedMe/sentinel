@@ -1,3 +1,3 @@
-// Package rbac holds the core RBAC domain: roles, permissions, resources and the authorization decision logic.
-// It is an empty placeholder until a later batch fills it in.
+// Package rbac holds the core RBAC domain: roles, permissions, resources,
+// input validation and the PolicyStore interface. It has no database or HTTP code.
 package rbac
