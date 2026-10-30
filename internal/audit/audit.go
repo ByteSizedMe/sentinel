@@ -11,6 +11,7 @@ type Entry struct {
 	Resource string
 	Allowed  bool
 	Reason   string
+	Source   string // "db" or "cache": where the decision was read from
 }
 
 // Logger appends decisions to the audit log. There is deliberately no way to

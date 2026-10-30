@@ -39,12 +39,12 @@ func (s *Postgres) CheckPermission(ctx context.Context, userID, action, resource
 	var role string
 	err := s.pool.QueryRow(ctx, checkPermissionSQL, userID, action, resource).Scan(&role)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return rbac.Decision{Allowed: false}, nil // no grant found: a normal "deny"
+		return rbac.Decision{Allowed: false, Source: rbac.SourceDB}, nil // no grant found: a normal "deny"
 	}
 	if err != nil {
 		// Could not answer. Return a zero Decision (Allowed=false) alongside
 		// the error so a caller that forgets to check err still denies.
 		return rbac.Decision{}, mapErr(err)
 	}
-	return rbac.Decision{Allowed: true, MatchedRole: role}, nil
+	return rbac.Decision{Allowed: true, MatchedRole: role, Source: rbac.SourceDB}, nil
 }

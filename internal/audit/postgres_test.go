@@ -44,20 +44,20 @@ func TestPostgresRecordAndAppendOnly(t *testing.T) {
 
 	// 1. Record works and stores every field.
 	l := NewPostgres(pool)
-	err := l.Record(ctx, Entry{Caller: "audit-test", UserID: user, Action: "read", Resource: "invoices", Allowed: true, Reason: "permission granted"})
+	err := l.Record(ctx, Entry{Caller: "audit-test", UserID: user, Action: "read", Resource: "invoices", Allowed: true, Reason: "permission granted", Source: "cache"})
 	if err != nil {
 		t.Fatalf("Record: %v", err)
 	}
-	var caller, action, resource, reason string
+	var caller, action, resource, reason, source string
 	var allowed bool
 	err = pool.QueryRow(ctx,
-		`SELECT caller, action, resource, allowed, reason FROM audit_log WHERE user_id = $1`, user).
-		Scan(&caller, &action, &resource, &allowed, &reason)
+		`SELECT caller, action, resource, allowed, reason, source FROM audit_log WHERE user_id = $1`, user).
+		Scan(&caller, &action, &resource, &allowed, &reason, &source)
 	if err != nil {
 		t.Fatalf("select: %v", err)
 	}
-	if caller != "audit-test" || action != "read" || resource != "invoices" || !allowed || reason != "permission granted" {
-		t.Errorf("stored row = %q %q %q %v %q", caller, action, resource, allowed, reason)
+	if caller != "audit-test" || action != "read" || resource != "invoices" || !allowed || reason != "permission granted" || source != "cache" {
+		t.Errorf("stored row = %q %q %q %v %q %q", caller, action, resource, allowed, reason, source)
 	}
 
 	// 2. The database itself rejects changes, whatever the application does.
@@ -88,6 +88,19 @@ func TestPostgresRecordAndAppendOnly(t *testing.T) {
 	var n int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM audit_log WHERE user_id = $1 AND allowed`, user).Scan(&n); err != nil || n != 1 {
 		t.Errorf("row count after rejected changes = %d, err = %v; want 1", n, err)
+	}
+}
+
+// The database only accepts the two known sources; a missing or unknown one is
+// an error, so a bug cannot silently mislabel where a decision came from.
+func TestPostgresRejectsUnknownSource(t *testing.T) {
+	pool := testPool(t)
+	l := NewPostgres(pool)
+	for _, source := range []string{"", "memory", "DB"} {
+		e := Entry{Caller: "audit-test", UserID: "u", Action: "read", Resource: "r", Reason: "x", Source: source}
+		if err := l.Record(context.Background(), e); err == nil {
+			t.Errorf("source %q was accepted", source)
+		}
 	}
 }
 

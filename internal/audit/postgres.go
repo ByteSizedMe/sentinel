@@ -22,9 +22,9 @@ func NewPostgres(pool *pgxpool.Pool) *Postgres {
 // Record inserts one row. Parameterized SQL, like everything else.
 func (p *Postgres) Record(ctx context.Context, e Entry) error {
 	_, err := p.pool.Exec(ctx,
-		`INSERT INTO audit_log (caller, user_id, action, resource, allowed, reason)
-		 VALUES ($1, $2, $3, $4, $5, $6)`,
-		e.Caller, e.UserID, e.Action, e.Resource, e.Allowed, e.Reason)
+		`INSERT INTO audit_log (caller, user_id, action, resource, allowed, reason, source)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		e.Caller, e.UserID, e.Action, e.Resource, e.Allowed, e.Reason, e.Source)
 	if err != nil {
 		return fmt.Errorf("audit: record entry: %w", err)
 	}

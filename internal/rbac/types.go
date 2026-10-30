@@ -26,8 +26,15 @@ type Permission struct {
 	CreatedAt  time.Time `json:"created_at"`
 }
 
+// Where a decision came from. Recorded in the audit log.
+const (
+	SourceDB    = "db"    // answered by a fresh Postgres query
+	SourceCache = "cache" // answered from the cache
+)
+
 // Decision is the result of an authorization check.
 type Decision struct {
 	Allowed     bool
 	MatchedRole string // name of a role that granted access; empty when denied
+	Source      string // SourceDB or SourceCache
 }
