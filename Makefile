@@ -1,4 +1,4 @@
-.PHONY: up down run test migrate-up migrate-down token
+.PHONY: up down run test test-integration bench migrate-up migrate-down token
 
 # On Windows, always use cmd.exe so behaviour does not depend on whether Git
 # Bash happens to be on PATH. Every recipe below is one plain command, so it
@@ -24,6 +24,20 @@ run:
 
 test:
 	go test ./...
+
+# Integration tests and benchmarks need the docker-compose Postgres and Redis
+# (make up, make migrate-up). They are behind the "integration" build tag, so
+# plain `make test` never runs them. REDIS_URL falls back to the local default
+# if .env does not set it; they skip themselves if DATABASE_URL is unset.
+test-integration: REDIS_URL ?= redis://localhost:6379/0
+test-integration:
+	go test -tags integration -count=1 -v ./internal/integration/...
+
+# Compare /authorize with a warm cache against Postgres every time. Each run
+# adds audit_log rows (append-only, so they stay); see the note in the code.
+bench: REDIS_URL ?= redis://localhost:6379/0
+bench:
+	go test -tags integration -run NONE -bench . -benchtime 500x ./internal/integration/...
 
 # Apply / revert the SQL files in migrations/ (needs `make up` first).
 migrate-up:
