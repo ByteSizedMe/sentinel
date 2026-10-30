@@ -79,6 +79,7 @@ func (a *api) authorize(w http.ResponseWriter, r *http.Request) {
 		Resource: req.Resource,
 		Allowed:  resp.Allowed,
 		Reason:   resp.Reason,
+		Source:   decisionSource(decision),
 	})
 	if err != nil {
 		log.Printf("httpapi: audit write failed, withholding decision: %v", err)
@@ -87,6 +88,15 @@ func (a *api) authorize(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// decisionSource says where a decision came from, for the audit log. Anything
+// other than an explicit "cache" is recorded as a database read.
+func decisionSource(d rbac.Decision) string {
+	if d.Source == rbac.SourceCache {
+		return rbac.SourceCache
+	}
+	return rbac.SourceDB
 }
 
 // decodeAuthorizeRequest reads and strictly validates the request body.

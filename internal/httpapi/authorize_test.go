@@ -199,8 +199,8 @@ func TestAuthorizeAuditEntryContents(t *testing.T) {
 	do(`{"user_id":"u2","action":"read","resource":"invoices"}`)
 
 	want := []audit.Entry{
-		{Caller: "svc-billing", UserID: "u1", Action: "read", Resource: "invoices", Allowed: true, Reason: "permission granted"},
-		{Caller: "svc-billing", UserID: "u2", Action: "read", Resource: "invoices", Allowed: false, Reason: "no matching grant"},
+		{Caller: "svc-billing", UserID: "u1", Action: "read", Resource: "invoices", Allowed: true, Reason: "permission granted", Source: "db"},
+		{Caller: "svc-billing", UserID: "u2", Action: "read", Resource: "invoices", Allowed: false, Reason: "no matching grant", Source: "db"},
 	}
 	got := audits.Entries()
 	if len(got) != len(want) {
