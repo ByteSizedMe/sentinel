@@ -13,8 +13,10 @@ import (
 
 	"github.com/bytesizedme/sentinel/internal/audit"
 	"github.com/bytesizedme/sentinel/internal/auth"
+	"github.com/bytesizedme/sentinel/internal/cache"
 	"github.com/bytesizedme/sentinel/internal/config"
 	"github.com/bytesizedme/sentinel/internal/httpapi"
+	"github.com/bytesizedme/sentinel/internal/rbac"
 	"github.com/bytesizedme/sentinel/internal/store"
 )
 
@@ -46,9 +48,25 @@ func run() error {
 	}
 	defer pool.Close()
 
+	// Policy store: Postgres, optionally fronted by the Redis decision cache.
+	// The client connects lazily, so Redis being down at startup is fine: every
+	// lookup then falls back to Postgres. (Never log REDIS_URL; it may hold a password.)
+	var policy rbac.PolicyStore = store.NewPostgres(pool)
+	if cfg.CacheTTL > 0 {
+		redisClient, err := cache.NewRedisClient(cfg.RedisURL)
+		if err != nil {
+			return err
+		}
+		defer redisClient.Close()
+		policy = cache.NewStore(policy, cache.NewRedis(redisClient, cfg.CacheTTL), cfg.CacheTTL)
+		log.Printf("decision cache enabled (ttl %s)", cfg.CacheTTL)
+	} else {
+		log.Printf("decision cache disabled")
+	}
+
 	srv := &http.Server{
 		Addr:    cfg.Addr,
-		Handler: httpapi.NewRouter(store.NewPostgres(pool), audit.NewPostgres(pool), tokens),
+		Handler: httpapi.NewRouter(policy, audit.NewPostgres(pool), tokens),
 		// Timeouts stop slow or malicious clients from holding connections
 		// open forever (e.g. the "slowloris" attack).
 		ReadHeaderTimeout: 5 * time.Second,
