@@ -32,4 +32,11 @@ type PolicyStore interface {
 	AssignRole(ctx context.Context, userID string, roleID int64) error
 	RemoveRole(ctx context.Context, userID string, roleID int64) error
 	ListUserRoles(ctx context.Context, userID string) ([]Role, error)
+
+	// CheckPermission answers "does this user hold a role that grants this
+	// action on this resource?". It returns Allowed=false (and a nil error) for
+	// ANY case with no grant, including an unknown user, resource or action.
+	// A non-nil error means the question could not be answered; callers must
+	// treat that as a denial too.
+	CheckPermission(ctx context.Context, userID, action, resource string) (Decision, error)
 }
