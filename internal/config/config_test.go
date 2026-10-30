@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 // validSecret is exactly the minimum length.
@@ -36,7 +37,8 @@ func TestLoad(t *testing.T) {
 			want: Config{
 				Addr:        ":8080",
 				DatabaseURL: "postgres://u:p@localhost:5433/db",
-				RedisAddr:   "localhost:6379",
+				RedisURL:    "redis://localhost:6379/0",
+				CacheTTL:    60 * time.Second,
 				JWTSecret:   validSecret,
 				JWTIssuer:   "sentinel-test",
 				JWTAudience: "sentinel-api",
@@ -45,14 +47,16 @@ func TestLoad(t *testing.T) {
 		{
 			name: "all values overridden",
 			env: baseEnv(map[string]string{
-				"SENTINEL_ADDR": ":9090",
-				"DATABASE_URL":  "postgres://x",
-				"REDIS_ADDR":    "redis:6380",
+				"SENTINEL_ADDR":     ":9090",
+				"DATABASE_URL":      "postgres://x",
+				"REDIS_URL":         "redis://redis:6380/1",
+				"CACHE_TTL_SECONDS": "5",
 			}),
 			want: Config{
 				Addr:        ":9090",
 				DatabaseURL: "postgres://x",
-				RedisAddr:   "redis:6380",
+				RedisURL:    "redis://redis:6380/1",
+				CacheTTL:    5 * time.Second,
 				JWTSecret:   validSecret,
 				JWTIssuer:   "sentinel-test",
 				JWTAudience: "sentinel-api",
@@ -60,16 +64,25 @@ func TestLoad(t *testing.T) {
 		},
 		{
 			name: "blank optional values fall back to defaults",
-			env:  baseEnv(map[string]string{"SENTINEL_ADDR": "  ", "REDIS_ADDR": ""}),
+			env:  baseEnv(map[string]string{"SENTINEL_ADDR": "  ", "REDIS_URL": ""}),
 			want: Config{
 				Addr:        ":8080",
 				DatabaseURL: "postgres://u:p@localhost:5433/db",
-				RedisAddr:   "localhost:6379",
+				RedisURL:    "redis://localhost:6379/0",
+				CacheTTL:    60 * time.Second,
 				JWTSecret:   validSecret,
 				JWTIssuer:   "sentinel-test",
 				JWTAudience: "sentinel-api",
 			},
 		},
+		{"cache disabled with 0", baseEnv(map[string]string{"CACHE_TTL_SECONDS": "0"}), Config{
+			Addr: ":8080", DatabaseURL: "postgres://u:p@localhost:5433/db", RedisURL: "redis://localhost:6379/0",
+			CacheTTL: 0, JWTSecret: validSecret, JWTIssuer: "sentinel-test", JWTAudience: "sentinel-api",
+		}, nil},
+		{"CACHE_TTL_SECONDS not a number", baseEnv(map[string]string{"CACHE_TTL_SECONDS": "soon"}), Config{}, ErrInvalidCacheTTL},
+		{"CACHE_TTL_SECONDS negative", baseEnv(map[string]string{"CACHE_TTL_SECONDS": "-1"}), Config{}, ErrInvalidCacheTTL},
+		{"CACHE_TTL_SECONDS too large", baseEnv(map[string]string{"CACHE_TTL_SECONDS": "3601"}), Config{}, ErrInvalidCacheTTL},
+		{"CACHE_TTL_SECONDS fractional", baseEnv(map[string]string{"CACHE_TTL_SECONDS": "1.5"}), Config{}, ErrInvalidCacheTTL},
 		{"missing DATABASE_URL", baseEnv(map[string]string{"DATABASE_URL": ""}), Config{}, ErrMissingDatabaseURL},
 		{"whitespace-only DATABASE_URL", baseEnv(map[string]string{"DATABASE_URL": "   "}), Config{}, ErrMissingDatabaseURL},
 		{"missing JWT_SECRET", baseEnv(map[string]string{"JWT_SECRET": ""}), Config{}, ErrMissingJWTSecret},

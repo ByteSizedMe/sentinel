@@ -258,8 +258,8 @@ func (f *fakeStore) CheckPermission(_ context.Context, userID, action, resource 
 		}
 	}
 	if len(matches) == 0 {
-		return rbac.Decision{}, nil
+		return rbac.Decision{Source: rbac.SourceDB}, nil
 	}
 	sort.Strings(matches) // same deterministic choice as ORDER BY r.name
-	return rbac.Decision{Allowed: true, MatchedRole: matches[0]}, nil
+	return rbac.Decision{Allowed: true, MatchedRole: matches[0], Source: rbac.SourceDB}, nil
 }
