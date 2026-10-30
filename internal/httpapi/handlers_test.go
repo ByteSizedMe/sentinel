@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bytesizedme/sentinel/internal/audit"
 	"github.com/bytesizedme/sentinel/internal/rbac"
 )
 
@@ -129,10 +130,12 @@ func TestHandlers(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := NewRouter(newFakeStore())
+			h := newTestRouter(t, newFakeStore(), &audit.Memory{})
+			token := testToken(t, "svc-test")
 			for i, s := range tt.steps {
 				req := httptest.NewRequest(s.method, s.path, strings.NewReader(s.body))
 				req.Header.Set("Content-Type", "application/json")
+				req.Header.Set("Authorization", "Bearer "+token)
 				rec := httptest.NewRecorder()
 				h.ServeHTTP(rec, req)
 
@@ -158,9 +161,11 @@ func (errStore) ListRoles(context.Context) ([]rbac.Role, error) {
 }
 
 func TestInternalErrorsAreNotLeaked(t *testing.T) {
-	h := NewRouter(errStore{newFakeStore()})
+	h := newTestRouter(t, errStore{newFakeStore()}, &audit.Memory{})
+	req := httptest.NewRequest(http.MethodGet, "/v1/roles", nil)
+	req.Header.Set("Authorization", "Bearer "+testToken(t, "svc-test"))
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/roles", nil))
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500", rec.Code)

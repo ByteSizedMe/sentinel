@@ -241,3 +241,25 @@ func without(ids []int64, drop int64) []int64 {
 	}
 	return out
 }
+
+// CheckPermission mirrors the SQL join: user -> roles -> granted permissions,
+// keeping a permission whose action and resource name match.
+func (f *fakeStore) CheckPermission(_ context.Context, userID, action, resource string) (rbac.Decision, error) {
+	var matches []string // names of roles that grant it
+	for _, roleID := range f.assigns[userID] {
+		for k := range f.grants {
+			if k[0] != roleID {
+				continue
+			}
+			p := f.permissions[k[1]]
+			if p.Action == action && f.resources[p.ResourceID].Name == resource {
+				matches = append(matches, f.roles[roleID].Name)
+			}
+		}
+	}
+	if len(matches) == 0 {
+		return rbac.Decision{}, nil
+	}
+	sort.Strings(matches) // same deterministic choice as ORDER BY r.name
+	return rbac.Decision{Allowed: true, MatchedRole: matches[0]}, nil
+}
