@@ -4,6 +4,8 @@ package httpapi
 import (
 	"net/http"
 
+	"github.com/bytesizedme/sentinel/internal/audit"
+	"github.com/bytesizedme/sentinel/internal/auth"
 	"github.com/bytesizedme/sentinel/internal/rbac"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -12,15 +14,14 @@ import (
 // api holds what the handlers need. Depending on the rbac.PolicyStore
 // interface (not Postgres) is what lets tests swap in a fake.
 type api struct {
-	store rbac.PolicyStore
+	store  rbac.PolicyStore
+	audits audit.Logger
 }
 
 // NewRouter builds the HTTP handler for the whole service.
-//
-// NOTE: the /v1 endpoints are NOT authenticated yet (JWT middleware comes in a
-// later batch). Do not expose this server beyond localhost.
-func NewRouter(store rbac.PolicyStore) http.Handler {
-	a := &api{store: store}
+// GET /health is public; everything under /v1 requires a valid JWT.
+func NewRouter(store rbac.PolicyStore, audits audit.Logger, tokens *auth.Validator) http.Handler {
+	a := &api{store: store, audits: audits}
 	r := chi.NewRouter()
 
 	// RequestID tags each request so log lines can be correlated.
@@ -32,6 +33,11 @@ func NewRouter(store rbac.PolicyStore) http.Handler {
 	r.Get("/health", health)
 
 	r.Route("/v1", func(r chi.Router) {
+		// Every /v1 route, including ones that do not exist, needs a token.
+		r.Use(auth.Middleware(tokens))
+
+		r.Post("/authorize", a.authorize)
+
 		r.Route("/roles", func(r chi.Router) {
 			r.Post("/", a.createRole)
 			r.Get("/", a.listRoles)

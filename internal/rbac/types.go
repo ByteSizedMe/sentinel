@@ -25,3 +25,9 @@ type Permission struct {
 	ResourceID int64     `json:"resource_id"`
 	CreatedAt  time.Time `json:"created_at"`
 }
+
+// Decision is the result of an authorization check.
+type Decision struct {
+	Allowed     bool
+	MatchedRole string // name of a role that granted access; empty when denied
+}

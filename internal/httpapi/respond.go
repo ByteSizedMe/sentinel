@@ -12,6 +12,9 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
+// errBodyTooLarge is returned by decodeJSON when the body exceeds its limit.
+var errBodyTooLarge = errors.New("request body too large")
+
 // maxBodyBytes caps request bodies so a client cannot make us read gigabytes.
 const maxBodyBytes = 64 << 10
 
@@ -31,6 +34,8 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 func writeError(w http.ResponseWriter, r *http.Request, err error) {
 	status, msg := http.StatusInternalServerError, "internal server error"
 	switch {
+	case errors.Is(err, errBodyTooLarge):
+		status, msg = http.StatusRequestEntityTooLarge, "request body too large"
 	case errors.Is(err, rbac.ErrInvalidInput):
 		status, msg = http.StatusBadRequest, err.Error()
 	case errors.Is(err, rbac.ErrNotFound):
@@ -50,6 +55,10 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			return errBodyTooLarge
+		}
 		return fmt.Errorf("%w: request body must be valid JSON with known fields", rbac.ErrInvalidInput)
 	}
 	// A second value after the first object (e.g. "{}{}") is also invalid.

@@ -11,6 +11,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bytesizedme/sentinel/internal/audit"
+	"github.com/bytesizedme/sentinel/internal/auth"
 	"github.com/bytesizedme/sentinel/internal/config"
 	"github.com/bytesizedme/sentinel/internal/httpapi"
 	"github.com/bytesizedme/sentinel/internal/store"
@@ -30,6 +32,13 @@ func run() error {
 		return err
 	}
 
+	// JWT settings were already checked by config.Load (including the minimum
+	// secret length), so the server cannot start without a usable key.
+	tokens, err := auth.NewValidator(cfg.JWTSecret, cfg.JWTIssuer, cfg.JWTAudience)
+	if err != nil {
+		return err
+	}
+
 	// Connect to Postgres. Migrations are NOT run here; use `make migrate-up`.
 	pool, err := store.Connect(context.Background(), cfg.DatabaseURL)
 	if err != nil {
@@ -39,7 +48,7 @@ func run() error {
 
 	srv := &http.Server{
 		Addr:    cfg.Addr,
-		Handler: httpapi.NewRouter(store.NewPostgres(pool)),
+		Handler: httpapi.NewRouter(store.NewPostgres(pool), audit.NewPostgres(pool), tokens),
 		// Timeouts stop slow or malicious clients from holding connections
 		// open forever (e.g. the "slowloris" attack).
 		ReadHeaderTimeout: 5 * time.Second,

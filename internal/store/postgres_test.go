@@ -243,3 +243,81 @@ func TestSQLInjectionStringIsInert(t *testing.T) {
 		t.Errorf("GetRole = %+v, %v; want name stored verbatim", got, err)
 	}
 }
+
+// CheckPermission is the heart of the service, so test it against real SQL.
+func TestCheckPermission(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+	user := uniq("user")
+
+	role, err := s.CreateRole(ctx, uniq("editor"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	invoices, _ := s.CreateResource(ctx, uniq("invoices"), "")
+	reports, _ := s.CreateResource(ctx, uniq("reports"), "")
+	t.Cleanup(func() {
+		_ = s.DeleteRole(ctx, role.ID)
+		_ = s.DeleteResource(ctx, invoices.ID)
+		_ = s.DeleteResource(ctx, reports.ID)
+	})
+	perm, err := s.CreatePermission(ctx, "read", invoices.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.GrantPermission(ctx, role.ID, perm.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AssignRole(ctx, user, role.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name                   string
+		user, action, resource string
+		wantAllowed            bool
+		wantRole               string
+	}{
+		{"granted", user, "read", invoices.Name, true, role.Name},
+		{"other action on same resource", user, "write", invoices.Name, false, ""},
+		{"same action on other resource", user, "read", reports.Name, false, ""},
+		{"unknown resource", user, "read", uniq("nope"), false, ""},
+		{"unknown action", user, uniq("nope"), invoices.Name, false, ""},
+		{"unknown user", uniq("nobody"), "read", invoices.Name, false, ""},
+		{"case differs", user, "READ", invoices.Name, false, ""},
+		{"injection attempt in user id", "' OR '1'='1", "read", invoices.Name, false, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d, err := s.CheckPermission(ctx, tt.user, tt.action, tt.resource)
+			if err != nil {
+				t.Fatalf("CheckPermission: %v", err)
+			}
+			if d.Allowed != tt.wantAllowed || d.MatchedRole != tt.wantRole {
+				t.Errorf("decision = %+v, want allowed=%v role=%q", d, tt.wantAllowed, tt.wantRole)
+			}
+		})
+	}
+
+	// Removing the grant flips the answer to deny.
+	if err := s.RevokePermission(ctx, role.ID, perm.ID); err != nil {
+		t.Fatal(err)
+	}
+	if d, err := s.CheckPermission(ctx, user, "read", invoices.Name); err != nil || d.Allowed {
+		t.Errorf("after revoke: decision = %+v, err = %v; want denied", d, err)
+	}
+}
+
+// A failing database must produce an error AND a denying decision.
+func TestCheckPermissionDatabaseErrorFailsClosed(t *testing.T) {
+	s, pool := testStore(t)
+	pool.Close() // every query on a closed pool errors
+
+	d, err := s.CheckPermission(context.Background(), "u1", "read", "invoices")
+	if err == nil {
+		t.Fatal("expected an error from a closed pool")
+	}
+	if d.Allowed {
+		t.Error("decision must not be Allowed when the query failed")
+	}
+}

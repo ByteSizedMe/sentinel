@@ -1,4 +1,4 @@
-.PHONY: up down run test migrate-up migrate-down
+.PHONY: up down run test migrate-up migrate-down token
 
 # On Windows, always use cmd.exe so behaviour does not depend on whether Git
 # Bash happens to be on PATH. Every recipe below is one plain command, so it
@@ -31,3 +31,9 @@ migrate-up:
 
 migrate-down:
 	go run ./cmd/migrate down
+
+# Print a short-lived dev JWT (signed with JWT_SECRET from .env) to stdout.
+# The leading @ stops make from echoing the command, so only the token prints.
+# Local testing only. Options: go run ./cmd/tokengen -sub my-service -ttl 30m
+token:
+	@go run ./cmd/tokengen
