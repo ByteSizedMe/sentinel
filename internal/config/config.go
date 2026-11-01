@@ -3,6 +3,7 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -19,6 +20,29 @@ const (
 	MaxCacheTTLSeconds     = 3600
 )
 
+// Rate limit defaults and bounds. A requests-per-second value of 0 turns that
+// limiter off. The upper bound only catches typos that would overflow.
+const (
+	DefaultIPRPS        = 20
+	DefaultIPBurst      = 40
+	DefaultCallerRPS    = 50
+	DefaultCallerBurst  = 100
+	DefaultRateMaxKeys  = 10000
+	MinRateMaxKeys      = 100
+	maxRateLimitSetting = 1_000_000
+)
+
+// RateLimit holds the settings of the two in-process limiters (see
+// internal/ratelimit): one per client IP before authentication, one per caller
+// (JWT subject) after it.
+type RateLimit struct {
+	IPRPS       int // requests per second per IP; 0 disables the IP limiter
+	IPBurst     int // requests an IP may send at once
+	CallerRPS   int // requests per second per caller; 0 disables the caller limiter
+	CallerBurst int // requests a caller may send at once
+	MaxKeys     int // most IPs (and most callers) tracked at once
+}
+
 // Config holds every setting the service needs. No hosts or paths are
 // hard-coded elsewhere; they all come from here.
 type Config struct {
@@ -26,6 +50,8 @@ type Config struct {
 	DatabaseURL string        // PostgreSQL connection string (secret: never log it)
 	RedisURL    string        // Redis connection URL (may contain a password: never log it)
 	CacheTTL    time.Duration // how long a cached decision lives; 0 disables the cache
+
+	RateLimit RateLimit
 
 	JWTSecret   string // HS256 signing key (secret: never log it)
 	JWTIssuer   string // required "iss" claim value
@@ -40,6 +66,10 @@ var (
 	ErrMissingJWTIssuer   = errors.New("config: JWT_ISSUER is required")
 	ErrMissingJWTAudience = errors.New("config: JWT_AUDIENCE is required")
 	ErrInvalidCacheTTL    = errors.New("config: CACHE_TTL_SECONDS must be a whole number from 0 to 3600")
+
+	// ErrInvalidRateLimit is wrapped with the name of the offending variable.
+	// The message never includes the value that was set.
+	ErrInvalidRateLimit = errors.New("config: invalid rate limit setting")
 )
 
 // Load builds a Config using getenv to read variables. Passing the lookup
@@ -50,7 +80,12 @@ func Load(getenv func(string) string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	limits, err := parseRateLimit(getenv)
+	if err != nil {
+		return Config{}, err
+	}
 	cfg := Config{
+		RateLimit:   limits,
 		Addr:        valueOr(getenv("SENTINEL_ADDR"), ":8080"),
 		DatabaseURL: strings.TrimSpace(getenv("DATABASE_URL")),
 		RedisURL:    valueOr(getenv("REDIS_URL"), "redis://localhost:6379/0"),
@@ -83,6 +118,59 @@ func valueOr(v, def string) string {
 		return def
 	}
 	return strings.TrimSpace(v)
+}
+
+// parseRateLimit reads the RATE_LIMIT_* variables. Like the cache TTL, a value
+// that is not valid is an error and never a silent default, so a typo cannot
+// quietly turn a limit off or make it absurdly loose. Errors name the variable
+// and the rule, not the value.
+func parseRateLimit(getenv func(string) string) (RateLimit, error) {
+	var rl RateLimit
+	fields := []struct {
+		name string
+		def  int
+		dst  *int
+	}{
+		{"RATE_LIMIT_IP_RPS", DefaultIPRPS, &rl.IPRPS},
+		{"RATE_LIMIT_IP_BURST", DefaultIPBurst, &rl.IPBurst},
+		{"RATE_LIMIT_CALLER_RPS", DefaultCallerRPS, &rl.CallerRPS},
+		{"RATE_LIMIT_CALLER_BURST", DefaultCallerBurst, &rl.CallerBurst},
+		{"RATE_LIMIT_MAX_KEYS", DefaultRateMaxKeys, &rl.MaxKeys},
+	}
+	for _, f := range fields {
+		n, err := parseWholeNumber(getenv(f.name), f.def)
+		if err != nil {
+			return RateLimit{}, fmt.Errorf("%w: %s must be a whole number from 0 to %d", ErrInvalidRateLimit, f.name, maxRateLimitSetting)
+		}
+		*f.dst = n
+	}
+
+	// A burst below 1 would refuse everything, so it is only allowed while the
+	// limiter it belongs to is off (RPS 0).
+	if rl.IPRPS > 0 && rl.IPBurst < 1 {
+		return RateLimit{}, fmt.Errorf("%w: RATE_LIMIT_IP_BURST must be at least 1 when RATE_LIMIT_IP_RPS is above 0", ErrInvalidRateLimit)
+	}
+	if rl.CallerRPS > 0 && rl.CallerBurst < 1 {
+		return RateLimit{}, fmt.Errorf("%w: RATE_LIMIT_CALLER_BURST must be at least 1 when RATE_LIMIT_CALLER_RPS is above 0", ErrInvalidRateLimit)
+	}
+	if rl.MaxKeys < MinRateMaxKeys {
+		return RateLimit{}, fmt.Errorf("%w: RATE_LIMIT_MAX_KEYS must be at least %d", ErrInvalidRateLimit, MinRateMaxKeys)
+	}
+	return rl, nil
+}
+
+// parseWholeNumber returns def for an empty value, and an error for anything
+// that is not a whole number from 0 to maxRateLimitSetting.
+func parseWholeNumber(v string, def int) (int, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return def, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 || n > maxRateLimitSetting {
+		return 0, ErrInvalidRateLimit
+	}
+	return n, nil
 }
 
 // parseCacheTTL reads CACHE_TTL_SECONDS. Empty means the default; anything

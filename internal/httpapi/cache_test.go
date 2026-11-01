@@ -139,7 +139,7 @@ func TestAuthorizeWorksWhenCacheIsDown(t *testing.T) {
 	store := newFakeStore()
 	audits := &audit.Memory{}
 	v, _ := auth.NewValidator(testSecret, testIssuer, testAudience)
-	h := NewRouter(cache.NewStore(store, mem, time.Minute), audits, v)
+	h := NewRouter(cache.NewStore(store, mem, time.Minute), audits, v, Limits{})
 
 	runSteps(t, h, audits, join(catalog, grantAndAssign, []cstep{
 		ask(true, "db"), ask(true, "db"),
@@ -162,7 +162,7 @@ func newCachedRouter(t *testing.T) (http.Handler, *audit.Memory) {
 		t.Fatal(err)
 	}
 	store := cache.NewStore(newFakeStore(), cache.NewMemory(time.Minute), time.Minute)
-	return NewRouter(store, audits, v), audits
+	return NewRouter(store, audits, v, Limits{}), audits
 }
 
 // runSteps sends each step, checking status and, for authorize, the decision

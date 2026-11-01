@@ -167,6 +167,55 @@ All settings come from environment variables (see `.env.example`).
 | `JWT_SECRET`         | none (required)            | HS256 signing key, at least 32 characters          |
 | `JWT_ISSUER`         | none (required)            | expected `iss` claim                               |
 | `JWT_AUDIENCE`       | none (required)            | expected `aud` claim                               |
+| `RATE_LIMIT_IP_RPS`  | `20`                       | requests per second per client IP; `0` turns the IP limiter off |
+| `RATE_LIMIT_IP_BURST` | `40`                      | requests one IP may send at once (at least 1 while the limiter is on) |
+| `RATE_LIMIT_CALLER_RPS` | `50`                    | requests per second per caller (token `sub`); `0` turns it off |
+| `RATE_LIMIT_CALLER_BURST` | `100`                 | requests one caller may send at once (at least 1 while the limiter is on) |
+| `RATE_LIMIT_MAX_KEYS` | `10000`                   | most IPs (and, separately, callers) tracked at once; at least 100 |
+
+The rate-limit values are whole numbers. A value that is negative, not a number
+or out of range makes the server refuse to start, with a message that names the
+variable (never its value).
+
+## Rate limiting
+
+Two token-bucket limiters protect `/v1`. `/health` is never limited.
+
+1. **Per client IP, before authentication.** It slows down token guessing and
+   floods of requests with invalid tokens, because those are refused before any
+   token is checked.
+2. **Per caller, after authentication.** The key is the token's `sub`, so one
+   valid caller cannot hammer the service. It runs before the scope check, so a
+   caller that keeps getting `403` spends its own budget too, and a request with
+   an invalid token never spends anyone's.
+
+The order on every `/v1` route is: per-IP limit, JWT check, per-caller limit,
+scope check, handler. A refused request gets `429 {"error":"too many requests"}`
+and a `Retry-After` header in whole seconds (at least 1). The response is the same
+for both limiters, so it does not say which one fired or what the limits are. Each
+bucket holds `BURST` requests and refills at `RPS` per second.
+
+Things to know:
+
+- **Per process, in memory.** Nothing is shared. With several instances each one
+  counts on its own, so the effective limit is multiplied by the number of
+  instances, and a restart resets every counter.
+- **Bounded memory.** At most `RATE_LIMIT_MAX_KEYS` keys are tracked per limiter.
+  When the cap is reached the least recently seen key is dropped, and idle keys
+  are swept during normal calls (no background goroutine). A client that fills
+  the table with many addresses can therefore push out other keys, which then
+  start again with a full bucket.
+- **The client IP is the TCP peer address (`r.RemoteAddr`) and nothing else.**
+  `X-Forwarded-For`, `X-Real-IP` and `Forwarded` are ignored on purpose: the client
+  controls them, so honoring them would let anyone dodge the limit by changing a
+  header. The consequence is that behind a reverse proxy or load balancer every
+  client shares the proxy's address and therefore one IP budget. Running behind a
+  proxy needs a trusted-proxy design (only believing the header from known proxy
+  addresses), which is not built yet. IPv6 clients are limited per full address,
+  not per network prefix.
+- **Logging.** Rejections are not logged one by one: at most one generic line per
+  key per minute, with the route pattern and the IP or subject quoted. Tokens are
+  never logged.
 
 ## Authentication
 
@@ -237,6 +286,7 @@ they never include database details.
 | 404 | not found, including a referenced role, resource or permission that does not exist |
 | 409 | already exists (duplicate name, grant or assignment) |
 | 413 | request body too large |
+| 429 | too many requests; see `Retry-After` (and [Rate limiting](#rate-limiting)) |
 | 500 | internal error (details are logged, never returned) |
 
 Objects:
@@ -352,6 +402,8 @@ anyone who holds `JWT_SECRET` can mint a token with any scope (see Limitations).
   and no string-built SQL.
 - **Strict input validation.** Allow-listed characters, length limits, a body size
   limit and rejection of unknown JSON fields, before anything reaches the database.
+- **Rate limiting.** A per-IP limit before authentication and a per-caller limit
+  after it, with bounded memory and a fixed `429` response (see Rate limiting).
 - **Scopes on every route.** A token must carry the scope its route needs
   (`sentinel:authorize`, `sentinel:read` or `sentinel:admin`), so a caller that
   may only ask questions cannot change policy. A route with no scope declared
@@ -404,8 +456,10 @@ loaded or slower than this local setup; it was not measured here.
 - Single instance. The cache's failure handling (the 5 second skip and the
   skip-for-one-TTL after a failed invalidation) is kept in memory per process; with
   several instances it would need to be shared.
-- No rate limiting. A caller with a token can create many cache entries; they
-  expire after the TTL, but memory use in Redis is not otherwise capped.
+- Rate limits are per process and in memory, and the client IP is the TCP peer
+  address, so they do not add up across instances and behind a proxy all clients
+  look like one (see Rate limiting). Redis memory is still not capped: a caller
+  can create many cache entries within its rate limit, and they expire after the TTL.
 - The audit table owner can still drop the triggers; a separate low-privilege
   database role for the app would harden this.
 - List endpoints have no pagination.
@@ -426,5 +480,6 @@ internal/store    PostgreSQL implementation of PolicyStore (pgx)
 internal/auth     JWT validation and middleware
 internal/audit    append-only audit log
 internal/cache    Redis decision cache and invalidating store wrapper
+internal/ratelimit  in-memory token-bucket rate limiter
 internal/integration  full-stack tests and benchmarks (build tag: integration)
 ```

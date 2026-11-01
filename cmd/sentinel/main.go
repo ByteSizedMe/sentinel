@@ -16,6 +16,7 @@ import (
 	"github.com/bytesizedme/sentinel/internal/cache"
 	"github.com/bytesizedme/sentinel/internal/config"
 	"github.com/bytesizedme/sentinel/internal/httpapi"
+	"github.com/bytesizedme/sentinel/internal/ratelimit"
 	"github.com/bytesizedme/sentinel/internal/rbac"
 	"github.com/bytesizedme/sentinel/internal/store"
 )
@@ -64,9 +65,20 @@ func run() error {
 		log.Printf("decision cache disabled")
 	}
 
+	// Rate limits are in memory and per process (see the README).
+	limits := httpapi.Limits{
+		IP: ratelimit.New(ratelimit.Config{
+			Rate: float64(cfg.RateLimit.IPRPS), Burst: cfg.RateLimit.IPBurst, MaxKeys: cfg.RateLimit.MaxKeys,
+		}),
+		Caller: ratelimit.New(ratelimit.Config{
+			Rate: float64(cfg.RateLimit.CallerRPS), Burst: cfg.RateLimit.CallerBurst, MaxKeys: cfg.RateLimit.MaxKeys,
+		}),
+	}
+	log.Printf("rate limiting: per-IP %s, per-caller %s", onOff(limits.IP), onOff(limits.Caller))
+
 	srv := &http.Server{
 		Addr:    cfg.Addr,
-		Handler: httpapi.NewRouter(policy, audit.NewPostgres(pool), tokens),
+		Handler: httpapi.NewRouter(policy, audit.NewPostgres(pool), tokens, limits),
 		// Timeouts stop slow or malicious clients from holding connections
 		// open forever (e.g. the "slowloris" attack).
 		ReadHeaderTimeout: 5 * time.Second,
@@ -106,4 +118,12 @@ func run() error {
 	}
 	log.Println("stopped cleanly")
 	return nil
+}
+
+// onOff names a limiter state for the startup log.
+func onOff(l *ratelimit.Limiter) string {
+	if l.Enabled() {
+		return "on"
+	}
+	return "off"
 }
