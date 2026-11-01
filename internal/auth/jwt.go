@@ -49,35 +49,53 @@ func NewValidator(secret, issuer, audience string) (*Validator, error) {
 	}, nil
 }
 
+// tokenClaims are the registered claims plus "scope". Scope is typed `any` on
+// purpose: a token whose scope is a number or an array must still parse, and
+// then simply carry no scopes (see parseScopes), rather than fail as a 401.
+type tokenClaims struct {
+	jwt.RegisteredClaims
+	Scope any `json:"scope,omitempty"`
+}
+
+// Caller is who a valid token says is asking, and what it may do.
+type Caller struct {
+	Subject string   // the "sub" claim
+	Scopes  []string // known scopes from the "scope" claim
+}
+
 // ValidateToken verifies the signature, algorithm, exp, iss and aud of a raw
-// token string and returns its subject (the caller's identity).
+// token string and returns the caller (subject and scopes).
 // Any failure returns an error wrapping ErrInvalidToken.
-func (v *Validator) ValidateToken(raw string) (string, error) {
-	claims := &jwt.RegisteredClaims{}
+func (v *Validator) ValidateToken(raw string) (Caller, error) {
+	claims := &tokenClaims{}
 	_, err := v.parser.ParseWithClaims(raw, claims, func(*jwt.Token) (any, error) {
 		// Only reached after the algorithm allow-list check passed.
 		return v.secret, nil
 	})
 	if err != nil {
-		return "", fmt.Errorf("%w: %w", ErrInvalidToken, err)
+		return Caller{}, fmt.Errorf("%w: %w", ErrInvalidToken, err)
 	}
 	// We use the subject as the caller identity, so it must exist.
 	if claims.Subject == "" {
-		return "", fmt.Errorf("%w: missing subject", ErrInvalidToken)
+		return Caller{}, fmt.Errorf("%w: missing subject", ErrInvalidToken)
 	}
-	return claims.Subject, nil
+	return Caller{Subject: claims.Subject, Scopes: parseScopes(claims.Scope)}, nil
 }
 
-// Mint creates a signed HS256 token. It exists for local development
+// Mint creates a signed HS256 token. scope is the space-separated "scope"
+// claim; empty means the claim is left out. It exists for local development
 // (cmd/tokengen) and for tests; the server itself never mints tokens.
-func Mint(secret, issuer, audience, subject string, ttl time.Duration) (string, error) {
+func Mint(secret, issuer, audience, subject, scope string, ttl time.Duration) (string, error) {
 	now := time.Now()
-	claims := jwt.RegisteredClaims{
+	claims := tokenClaims{RegisteredClaims: jwt.RegisteredClaims{
 		Issuer:    issuer,
 		Subject:   subject,
 		Audience:  jwt.ClaimStrings{audience},
 		IssuedAt:  jwt.NewNumericDate(now),
 		ExpiresAt: jwt.NewNumericDate(now.Add(ttl)),
+	}}
+	if scope != "" {
+		claims.Scope = scope
 	}
 	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(secret))
 }

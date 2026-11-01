@@ -10,8 +10,8 @@ import (
 
 func TestMiddleware(t *testing.T) {
 	v, _ := NewValidator(testSecret, testIssuer, testAudience)
-	good, _ := Mint(testSecret, testIssuer, testAudience, "svc-a", time.Hour)
-	bad, _ := Mint("another-secret-that-is-also-32-bytes-long", testIssuer, testAudience, "svc-a", time.Hour)
+	good, _ := Mint(testSecret, testIssuer, testAudience, "svc-a", "", time.Hour)
+	bad, _ := Mint("another-secret-that-is-also-32-bytes-long", testIssuer, testAudience, "svc-a", "", time.Hour)
 
 	tests := []struct {
 		name       string
