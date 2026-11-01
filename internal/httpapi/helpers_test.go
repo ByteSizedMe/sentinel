@@ -25,7 +25,7 @@ func newTestRouter(t *testing.T, store rbac.PolicyStore, audits audit.Logger) ht
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewRouter(store, audits, v)
+	return NewRouter(store, audits, v, Limits{})
 }
 
 // testToken mints a valid token whose subject is the given caller, holding all

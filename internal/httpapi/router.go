@@ -3,6 +3,7 @@ package httpapi
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/bytesizedme/sentinel/internal/audit"
 	"github.com/bytesizedme/sentinel/internal/auth"
@@ -68,10 +69,18 @@ func (a *api) v1Routes() []route {
 }
 
 // NewRouter builds the HTTP handler for the whole service.
-// GET /health is public; everything under /v1 requires a valid JWT (401) that
-// also carries the scope the route needs (403).
-func NewRouter(store rbac.PolicyStore, audits audit.Logger, tokens *auth.Validator) http.Handler {
+// GET /health is public and never rate limited. Everything under /v1 is rate
+// limited, requires a valid JWT (401) and carries the scope the route needs (403).
+// A zero Limits turns rate limiting off.
+func NewRouter(store rbac.PolicyStore, audits audit.Logger, tokens *auth.Validator, limits Limits) http.Handler {
+	return newRouter(store, audits, tokens, limits, time.Now)
+}
+
+// newRouter is NewRouter with the clock used to throttle rate-limit log lines
+// passed in, so tests can move time by hand.
+func newRouter(store rbac.PolicyStore, audits audit.Logger, tokens *auth.Validator, limits Limits, now func() time.Time) http.Handler {
 	a := &api{store: store, audits: audits}
+	logs := newRejectLog(now)
 	r := chi.NewRouter()
 
 	// RequestID tags each request so log lines can be correlated.
@@ -83,8 +92,15 @@ func NewRouter(store rbac.PolicyStore, audits audit.Logger, tokens *auth.Validat
 	r.Get("/health", health)
 
 	r.Route("/v1", func(r chi.Router) {
-		// Every /v1 route, including ones that do not exist, needs a token.
+		// The order matters. It applies to every /v1 route, including ones
+		// that do not exist:
+		//   1. per-IP limit: slows token guessing and floods of invalid tokens,
+		//   2. JWT check: 401 for a missing or bad token (those never reach 3),
+		//   3. per-caller limit: keyed by the token subject, so 403s count too,
+		//   4. scope check, then the handler (added per route below).
+		r.Use(limitByIP(limits.IP, logs))
 		r.Use(auth.Middleware(tokens))
+		r.Use(limitByCaller(limits.Caller, logs))
 
 		for _, rt := range a.v1Routes() {
 			// With() puts the scope check in front of this one handler only.

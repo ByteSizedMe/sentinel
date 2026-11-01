@@ -87,7 +87,7 @@ func (e *env) routerWith(t testing.TB, c cache.Cache, audits audit.Logger) http.
 	if err != nil {
 		t.Fatal(err)
 	}
-	return httpapi.NewRouter(policy, audits, v)
+	return httpapi.NewRouter(policy, audits, v, httpapi.Limits{}) // limiters off: the tests send many requests from one address
 }
 
 func token(t testing.TB, subject string) string {
