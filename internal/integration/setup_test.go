@@ -9,6 +9,7 @@ import (
 	"context"
 	"net/http"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -91,7 +92,7 @@ func (e *env) routerWith(t testing.TB, c cache.Cache, audits audit.Logger) http.
 
 func token(t testing.TB, subject string) string {
 	t.Helper()
-	tok, err := auth.Mint(testSecret, testIssuer, testAudience, subject, time.Hour)
+	tok, err := auth.Mint(testSecret, testIssuer, testAudience, subject, strings.Join(auth.AllScopes, " "), time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}

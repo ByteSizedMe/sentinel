@@ -167,14 +167,14 @@ func TestValidateToken(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sub, err := v.ValidateToken(tt.token)
+			caller, err := v.ValidateToken(tt.token)
 
 			if tt.wantCause == nil {
 				if err != nil {
 					t.Fatalf("unexpected error: %v", err)
 				}
-				if sub != tt.wantSub {
-					t.Errorf("subject = %q, want %q", sub, tt.wantSub)
+				if caller.Subject != tt.wantSub {
+					t.Errorf("subject = %q, want %q", caller.Subject, tt.wantSub)
 				}
 				return
 			}
@@ -184,8 +184,8 @@ func TestValidateToken(t *testing.T) {
 			if !errors.Is(err, tt.wantCause) {
 				t.Errorf("error = %v, want cause %v", err, tt.wantCause)
 			}
-			if sub != "" {
-				t.Errorf("subject = %q on failure, want empty", sub)
+			if caller.Subject != "" || caller.Scopes != nil {
+				t.Errorf("caller = %+v on failure, want empty", caller)
 			}
 		})
 	}
@@ -209,12 +209,12 @@ func TestNewValidatorRequiresAllSettings(t *testing.T) {
 // Tokens made by Mint must pass the validator (this is what cmd/tokengen uses).
 func TestMintRoundTrip(t *testing.T) {
 	v, _ := NewValidator(testSecret, testIssuer, testAudience)
-	tok, err := Mint(testSecret, testIssuer, testAudience, "svc-b", time.Minute)
+	tok, err := Mint(testSecret, testIssuer, testAudience, "svc-b", "sentinel:read sentinel:admin", time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sub, err := v.ValidateToken(tok)
-	if err != nil || sub != "svc-b" {
-		t.Errorf("ValidateToken = %q, %v; want svc-b, nil", sub, err)
+	caller, err := v.ValidateToken(tok)
+	if err != nil || caller.Subject != "svc-b" || strings.Join(caller.Scopes, ",") != "sentinel:read,sentinel:admin" {
+		t.Errorf("ValidateToken = %+v, %v; want svc-b with read and admin scopes, nil", caller, err)
 	}
 }

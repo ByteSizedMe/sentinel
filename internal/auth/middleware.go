@@ -20,7 +20,9 @@ func SubjectFromContext(ctx context.Context) (string, bool) {
 }
 
 // Middleware rejects requests that lack a valid "Authorization: Bearer <jwt>"
-// header. On success it stores the token's subject in the request context.
+// header. On success it stores the token's subject and scopes in the request
+// context. It only proves WHO is calling; whether that caller may use a route
+// is decided per route by the scope check in internal/httpapi.
 func Middleware(v *Validator) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -29,14 +31,15 @@ func Middleware(v *Validator) func(http.Handler) http.Handler {
 				unauthorized(w)
 				return
 			}
-			subject, err := v.ValidateToken(raw)
+			caller, err := v.ValidateToken(raw)
 			if err != nil {
 				// Deliberately not logged and not described: the reason could
 				// help an attacker, and logging risks leaking the token.
 				unauthorized(w)
 				return
 			}
-			ctx := context.WithValue(r.Context(), ctxKey{}, subject)
+			ctx := context.WithValue(r.Context(), ctxKey{}, caller.Subject)
+			ctx = context.WithValue(ctx, scopesKey{}, caller.Scopes)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
