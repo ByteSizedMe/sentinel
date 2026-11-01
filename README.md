@@ -1,5 +1,7 @@
 # Sentinel
 
+[![CI](https://github.com/ByteSizedMe/sentinel/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ByteSizedMe/sentinel/actions/workflows/ci.yml)
+
 Sentinel is an application-level RBAC authorization microservice written in Go.
 Other services call it to ask one question: **can user X perform action Y on
 resource Z?** It answers with an allow/deny decision and a reason. Anything not
