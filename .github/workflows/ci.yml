@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# The workflow only needs to read the code. No secrets are used anywhere.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    # Throwaway databases that live only for this job.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ci_user
+          POSTGRES_PASSWORD: ci-only-dummy-password
+          POSTGRES_DB: sentinel_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ci_user -d sentinel_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    # Dummy values for CI only. None of them is a real credential.
+    env:
+      DATABASE_URL: postgres://ci_user:ci-only-dummy-password@localhost:5432/sentinel_ci?sslmode=disable
+      REDIS_URL: redis://localhost:6379/0
+      JWT_SECRET: ci-dummy-jwt-secret-not-real-0123456789
+      JWT_ISSUER: sentinel-ci
+      JWT_AUDIENCE: sentinel-ci-api
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Apply migrations
+        run: go run ./cmd/migrate up
+
+      - name: Unit tests (race detector)
+        run: go test -race -count=1 ./...
+
+      - name: Integration tests (race detector)
+        run: go test -race -tags integration -count=1 ./internal/integration/...
+
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+          govulncheck ./...
+
+      - name: gosec
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@v2.30.0
+          gosec ./...
