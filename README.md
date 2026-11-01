@@ -88,6 +88,7 @@ Both are bound to 127.0.0.1.
 3. In a second PowerShell window, mint a dev token and call the API:
 
    ```powershell
+   # Local testing only: this token carries all three scopes (see Scopes).
    $token = make token
    $h = @{ Authorization = "Bearer $token" }
    $j = "application/json"
@@ -122,7 +123,7 @@ Press Ctrl+C to stop the server; it shuts down gracefully.
 | `make migrate-up`       | apply migrations                             | `go run ./cmd/migrate up`                               |
 | `make migrate-down`     | revert all migrations (**deletes data**)     | `go run ./cmd/migrate down`                             |
 | `make run`              | run the server                               | `go run ./cmd/sentinel`                                 |
-| `make token`            | print a dev JWT (local testing only)         | `go run ./cmd/tokengen`                                 |
+| `make token`            | print a dev JWT, all scopes (local testing only) | `go run ./cmd/tokengen`                                 |
 | `make test`             | unit tests (plus store tests if the DB is up)| `go test ./...`                                         |
 | `make test-integration` | full-stack tests against Postgres and Redis  | `go test -tags integration -count=1 -v ./internal/integration/...` |
 | `make bench`            | cache vs no-cache benchmarks                 | `go test -tags integration -run NONE -bench . -benchtime 500x ./internal/integration/...` |
@@ -176,13 +177,50 @@ else gets the same generic `401`. Other algorithms (including `none`) are
 rejected. The token identifies the **calling service** (the `sub` claim, stored
 in the audit log); it never decides which user an authorization check is about.
 
+### Scopes
+
+Having a valid token is not enough: each `/v1` route also needs a **scope** in
+the token's `scope` claim. That claim is one space-separated string, such as
+`"sentinel:authorize sentinel:read"`. A valid token that lacks the scope a route
+needs gets `403 {"error":"forbidden"}`. The body is the same in every case and
+never says which scope was needed or which the token has.
+
+| Scope | Allows |
+|-------|--------|
+| `sentinel:authorize` | `POST /v1/authorize` only |
+| `sentinel:read` | every `GET` under `/v1` (list and get for roles, resources, permissions, role grants and user roles) |
+| `sentinel:admin` | every `POST` and `DELETE` under `/v1` except authorize (create, delete, grant, revoke, assign, remove) |
+
+The scopes are independent: `sentinel:admin` does **not** include read or
+authorize, so a token that creates roles and also needs to list them must carry
+both scopes. The claim is parsed strictly: entries are split on single spaces,
+matching is exact and case-sensitive, and unknown or empty entries are ignored.
+A missing, empty or non-string `scope` claim (a number or an array, say) means no
+scopes. Other spellings such as `scp` are not read. A route declared without a
+scope in the code answers `403` to everyone, so a forgotten scope fails closed.
+`/health` stays public.
+
+A `403` is logged as one line with the route pattern and the token's `sub`
+(never the token or its scopes). It is not written to the audit log, which only
+records authorization decisions.
+
+### Dev tokens
+
 `make token` mints a short-lived dev token from your `.env`. Options:
-`go run ./cmd/tokengen -sub my-service -ttl 30m`. Never log or commit tokens.
+`go run ./cmd/tokengen -sub my-service -ttl 30m -scopes "sentinel:authorize"`.
+**By default the token carries all three scopes. That default is for local
+testing only**: a real caller should get only the scopes it needs, for example
+`sentinel:authorize` for a service that only asks questions. Never log or commit
+tokens.
 
 ## API reference
 
 All request and response bodies are JSON. Send `Authorization: Bearer <jwt>` on
-every `/v1` request. IDs are numbers returned by the create calls. Names,
+every `/v1` request. **Each route also needs a scope in the token** (see
+[Scopes](#scopes)): `POST /v1/authorize` needs `sentinel:authorize`, every `GET`
+needs `sentinel:read`, and every other `POST` and `DELETE` needs `sentinel:admin`.
+A missing scope is a `403` on any route, so it is not repeated in the tables
+below. IDs are numbers returned by the create calls. Names,
 resource names and actions: 1 to 64 characters from letters, digits and `_ . : -`.
 User IDs: 1 to 128 characters, the same set plus `@`. Descriptions: up to 256
 characters, no control characters. Request bodies are limited to 64 KB (4 KB for
@@ -195,6 +233,7 @@ they never include database details.
 |--------|---------|
 | 400 | invalid input (bad JSON, missing or malformed field, bad ID in the URL) |
 | 401 | missing, invalid or expired token |
+| 403 | valid token without the scope the route needs |
 | 404 | not found, including a referenced role, resource or permission that does not exist |
 | 409 | already exists (duplicate name, grant or assignment) |
 | 413 | request body too large |
@@ -276,8 +315,10 @@ A permission is one action on one resource.
 | `GET /v1/users/{userID}/roles` | | `200` array of Role (empty if none) | 400, 401 |
 | `DELETE /v1/users/{userID}/roles/{roleID}` | | `204` | 400, 401, 404 assignment not found |
 
-Any valid token can call every endpoint above, including the policy-changing
-ones. There are no per-caller permissions yet (see Limitations).
+Scopes by route: `GET` routes need `sentinel:read`; `POST` and `DELETE` routes
+above need `sentinel:admin`; `POST /v1/authorize` needs `sentinel:authorize`.
+Scopes live in the token, which is signed with the shared HS256 secret, so
+anyone who holds `JWT_SECRET` can mint a token with any scope (see Limitations).
 
 ## Caching
 
@@ -311,6 +352,10 @@ ones. There are no per-caller permissions yet (see Limitations).
   and no string-built SQL.
 - **Strict input validation.** Allow-listed characters, length limits, a body size
   limit and rejection of unknown JSON fields, before anything reaches the database.
+- **Scopes on every route.** A token must carry the scope its route needs
+  (`sentinel:authorize`, `sentinel:read` or `sentinel:admin`), so a caller that
+  may only ask questions cannot change policy. A route with no scope declared
+  answers `403`, and a test fails if a `/v1` route is added without one.
 - **JWT checks.** HS256 only (so `none` and algorithm-confusion tokens fail); `exp`,
   `iss`, `aud` and `sub` are required; a short clock-skew allowance; one generic
   `401` for every failure; tokens are never logged. The secret must be 32+ characters
@@ -350,8 +395,12 @@ loaded or slower than this local setup; it was not measured here.
 - No role hierarchies, deny rules or wildcard permissions: access is an exact
   (user's role, action, resource) match.
 - HS256 with a shared secret only. RS256 and JWKS key rotation are not supported.
-- Authentication is "any valid token": every token holder can use the policy
-  management endpoints. Per-caller permissions are future work.
+- Scopes are coarse: three independent scopes for the whole API, not per resource
+  or per role, and there is no callers table or token revocation. The scopes are
+  inside a token signed with the shared HS256 secret, so anyone who holds
+  `JWT_SECRET` can mint a token with any scope (including `sentinel:admin`). Treat
+  the secret like an admin credential, and issue tokens with the fewest scopes each
+  caller needs. A token's lifetime is not capped by the server.
 - Single instance. The cache's failure handling (the 5 second skip and the
   skip-for-one-TTL after a failed invalidation) is kept in memory per process; with
   several instances it would need to be shared.

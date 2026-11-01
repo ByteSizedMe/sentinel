@@ -85,8 +85,47 @@ and `TRUNCATE`), not just by convention.
   by a few trusted services, and keeps the key handling simple.
 - **Login, token refresh and user management.** Sentinel authorizes; it does not
   authenticate end users. Callers present a token issued elsewhere.
-- **Per-caller permissions on the management API.** Any valid token can change
-  policy for now.
+- **Finer-grained caller permissions.** Callers get three coarse scopes (see
+  section 7), not per-resource or per-role scopes, and there is no callers table
+  or token revocation.
 - **Rate limiting, metrics and tracing.** Out of scope for this stage.
 - **Cloud deployment and production container images.** Everything runs locally;
   configuration is read from environment variables so deployment stays possible later.
+
+## 7. Scopes in the JWT, one per kind of call
+
+**Decision.** Each `/v1` route requires a scope in the token's `scope` claim:
+`sentinel:authorize` for `POST /v1/authorize`, `sentinel:read` for every `GET`,
+`sentinel:admin` for every other `POST` and `DELETE`. A token that is valid but
+lacks the scope gets `403 {"error":"forbidden"}`.
+
+**Why scopes in the JWT.** The service already trusts the token's signature and
+`sub`. Putting the permission in the same signed token needs no new table, no
+extra query per request and nothing to keep in sync. The `scope` claim is the
+standard OAuth2 shape (one space-separated string), parsed strictly: exact,
+case-sensitive matches on single spaces, and a missing or non-string claim means
+no scopes.
+
+**Why three independent scopes.** The two jobs differ in risk: asking "may X do
+Y?" is something many services need, while changing policy is something almost
+none should. Admin does not imply read or authorize, so a token can be given
+exactly the access its caller needs and a stolen admin token does not also read
+or authorize unless it was issued with those scopes. There is no hierarchy to
+reason about.
+
+**Why a fixed 403 body.** The same `{"error":"forbidden"}` for every case, with no
+hint about the needed scope or the token's scopes, gives a prober nothing to learn
+from. The server logs the route pattern and the token's `sub` (quoted, never the
+token or scope list), and does not write to the audit log, which only records
+authorization decisions. A request with no valid token is still a `401`.
+
+**Why deny by default for routes.** All `/v1` routes are declared in one table
+that names each route's scope. A route declared with an empty scope is refused
+for everyone, and a test walks the real router and fails if a route exists
+without a scope, so a forgotten scope cannot become an open endpoint.
+
+**Cost.** Scopes are only as safe as the signing secret: with a shared HS256 key,
+anyone who holds `JWT_SECRET` can mint any scope. Changing a caller's scopes
+means issuing a new token, and an issued token cannot be revoked before it
+expires. RS256 with separate issuer and verifier keys would remove the first
+problem; it is left out for now.
