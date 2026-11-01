@@ -43,9 +43,24 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, rbac.ErrConflict):
 		status, msg = http.StatusConflict, "already exists"
 	default:
-		log.Printf("httpapi: %s %s: %v", r.Method, r.URL.Path, err)
+		// strconv.Quote escapes control characters (newlines become \n), so
+		// nothing in err can forge a log line. The output is the same as %q.
+		log.Printf("httpapi: %s %s: %s", strconv.Quote(r.Method), strconv.Quote(routePattern(r)), strconv.Quote(err.Error()))
 	}
 	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+// routePattern returns the matched Chi route, such as "/v1/roles/{roleID}".
+// It is used for logging instead of r.URL.Path: the pattern is written by us,
+// while the path is client input (a path containing %0A would put a newline
+// in the log and let a client forge log lines).
+func routePattern(r *http.Request) string {
+	if rc := chi.RouteContext(r.Context()); rc != nil {
+		if p := rc.RoutePattern(); p != "" {
+			return p
+		}
+	}
+	return "unmatched"
 }
 
 // decodeJSON reads a JSON body into dst. Unknown fields are rejected so typos
