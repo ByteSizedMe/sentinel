@@ -82,7 +82,7 @@ func (a *api) authorize(w http.ResponseWriter, r *http.Request) {
 		Source:   decisionSource(decision),
 	})
 	if err != nil {
-		log.Printf("httpapi: audit write failed, withholding decision: %v", err)
+		log.Printf("httpapi: audit write failed, withholding decision: %q", err.Error())
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
 		return
 	}
