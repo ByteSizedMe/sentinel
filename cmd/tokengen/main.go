@@ -1,7 +1,7 @@
 // Command tokengen prints a signed dev JWT for calling Sentinel locally.
 // It reads JWT_SECRET, JWT_ISSUER and JWT_AUDIENCE from the environment (the
 // same settings the server uses), so there is no secret in the source.
-// For local testing only.
+// For local testing only: by default the token carries ALL scopes (see -scopes).
 package main
 
 import (
@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/bytesizedme/sentinel/internal/auth"
@@ -18,6 +19,8 @@ import (
 func main() {
 	subject := flag.String("sub", "dev-service", "subject (the calling service's identity)")
 	ttl := flag.Duration("ttl", time.Hour, "how long the token stays valid")
+	scopes := flag.String("scopes", strings.Join(auth.AllScopes, " "),
+		"space-separated scopes; the default grants all three and is for local testing only")
 	flag.Parse()
 
 	// Reuse the server's config loading so the checks (e.g. minimum secret
@@ -26,7 +29,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("tokengen: %v", err)
 	}
-	token, err := auth.Mint(cfg.JWTSecret, cfg.JWTIssuer, cfg.JWTAudience, *subject, *ttl)
+	token, err := auth.Mint(cfg.JWTSecret, cfg.JWTIssuer, cfg.JWTAudience, *subject, *scopes, *ttl)
 	if err != nil {
 		log.Fatalf("tokengen: %v", err)
 	}
