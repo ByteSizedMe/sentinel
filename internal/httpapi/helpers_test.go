@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,10 +28,17 @@ func newTestRouter(t *testing.T, store rbac.PolicyStore, audits audit.Logger) ht
 	return NewRouter(store, audits, v)
 }
 
-// testToken mints a valid token whose subject is the given caller.
+// testToken mints a valid token whose subject is the given caller, holding all
+// three scopes so tests that are not about scopes can call any route.
 func testToken(t *testing.T, subject string) string {
 	t.Helper()
-	tok, err := auth.Mint(testSecret, testIssuer, testAudience, subject, time.Hour)
+	return testTokenScoped(t, subject, strings.Join(auth.AllScopes, " "))
+}
+
+// testTokenScoped is testToken with an exact "scope" claim ("" = no claim).
+func testTokenScoped(t *testing.T, subject, scope string) string {
+	t.Helper()
+	tok, err := auth.Mint(testSecret, testIssuer, testAudience, subject, scope, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}

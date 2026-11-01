@@ -73,7 +73,7 @@ func TestUnexpectedErrorLogCannotBeForged(t *testing.T) {
 			serve: func(w http.ResponseWriter, r *http.Request) {
 				newTestRouter(t, errStore{newFakeStore()}, &audit.Memory{}).ServeHTTP(w, r)
 			},
-			path:      "/v1/roles/",
+			path:      "/v1/roles",
 			wantInLog: []string{`"GET" "/v1/roles"`, `password authentication failed`},
 		},
 	}
