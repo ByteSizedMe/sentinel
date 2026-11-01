@@ -88,7 +88,9 @@ and `TRUNCATE`), not just by convention.
 - **Finer-grained caller permissions.** Callers get three coarse scopes (see
   section 7), not per-resource or per-role scopes, and there is no callers table
   or token revocation.
-- **Rate limiting, metrics and tracing.** Out of scope for this stage.
+- **Distributed rate limiting and trusted-proxy handling.** Limits are per
+  process (section 8), and the client IP ignores proxy headers.
+- **Metrics and tracing.** Out of scope for this stage.
 - **Cloud deployment and production container images.** Everything runs locally;
   configuration is read from environment variables so deployment stays possible later.
 
@@ -129,3 +131,40 @@ anyone who holds `JWT_SECRET` can mint any scope. Changing a caller's scopes
 means issuing a new token, and an issued token cannot be revoked before it
 expires. RS256 with separate issuer and verifier keys would remove the first
 problem; it is left out for now.
+
+## 8. Rate limiting: in-process buckets, IP first, then caller
+
+**Decision.** Two token-bucket limiters protect `/v1`: one per client IP
+before authentication, one per token subject after it. `/health` is exempt. A
+refusal is `429 {"error":"too many requests"}` with `Retry-After`. The order is
+IP limit, JWT check, caller limit, scope check, handler.
+
+**Why in-process buckets and not Redis.** Redis is already optional here: when it
+is down, the service falls back to Postgres. A Redis-backed limiter would add a
+new failure mode to every request and force a question with no good answer: if
+Redis is unreachable, do requests go through (fail open, no protection exactly
+when something is wrong) or get refused (fail closed, an outage of a cache takes
+the API down)? In-process buckets cost no network round trip and cannot fail that
+way. Memory is bounded with a key cap, least-recently-seen eviction and a lazy
+sweep of idle keys, so there is no background goroutine to leak or shut down.
+
+**Cost.** Counters are per process: with N instances the effective limit is up to
+N times higher, and a restart resets them. That is acceptable for stopping floods
+and token guessing, not for exact quotas. Distributed limiting is left for later.
+
+**Why this order.** The IP limiter goes first so that floods of invalid or missing
+tokens are slowed down before any token is parsed. The caller limiter needs the
+subject, so it must come after authentication; that also means an invalid token
+never spends a real caller's budget, so an attacker cannot drain someone else's
+allowance by sending garbage. It goes before the scope check so that a caller
+that keeps getting `403` still spends its own budget and cannot probe for free.
+
+**Why `RemoteAddr` only.** `X-Forwarded-For`, `X-Real-IP` and `Forwarded` are set
+by the client unless a trusted proxy overwrites them. Believing them would let any
+client pick a new key per request and walk around the limit, or charge someone
+else's address. The TCP peer address cannot be chosen that way. The cost is that
+behind a proxy or load balancer all clients share one address; fixing that needs
+a list of trusted proxies, which is future work.
+
+**Why one fixed 429.** Same body for both limiters and no limit values in the
+response, so a client learns nothing about which limiter fired or how it is set.
