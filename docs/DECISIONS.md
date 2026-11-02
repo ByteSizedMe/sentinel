@@ -163,8 +163,96 @@ that keeps getting `403` still spends its own budget and cannot probe for free.
 by the client unless a trusted proxy overwrites them. Believing them would let any
 client pick a new key per request and walk around the limit, or charge someone
 else's address. The TCP peer address cannot be chosen that way. The cost is that
-behind a proxy or load balancer all clients share one address; fixing that needs
-a list of trusted proxies, which is future work.
+behind a proxy or load balancer all clients share one address; section 10 adds
+an explicit list of trusted proxies for that case.
 
 **Why one fixed 429.** Same body for both limiters and no limit values in the
 response, so a client learns nothing about which limiter fired or how it is set.
+
+## 9. A second database role for the running service
+
+**Decision.** Migrations run as the database owner (`MIGRATE_DATABASE_URL`). The
+server runs as `sentinel_app` (`DATABASE_URL`), created by migration 000004 as
+`NOLOGIN` with no password in any file. It gets read and write on the five policy
+tables and only `SELECT` and `INSERT` on `audit_log`; nothing on `schema_migrations`;
+no `CREATE` in the schema. `make db-app-role` sets its login password.
+
+**Why the triggers alone were not enough.** The append-only triggers block
+`UPDATE`, `DELETE` and `TRUNCATE`, but a table owner can `DROP TRIGGER` (or
+`ALTER TABLE ... DISABLE TRIGGER`) and then change anything. A service that runs as
+the owner therefore protects its audit log only as well as its own code. Privileges
+close that gap: `sentinel_app` is not the owner, so it cannot touch the triggers,
+and it does not hold the privileges the triggers guard. Two layers now: a missing
+privilege for the app role, a trigger for everyone who does hold the privilege.
+The privilege tests check this by name, and they were confirmed to fail when
+`UPDATE` is granted to the role by hand.
+
+**Why a password script that reads the environment.** `ALTER ROLE ... PASSWORD`
+cannot take a bind parameter, so the statement is built by `psql`
+(`:'pw'` quotes the value as a string literal). The value reaches `psql` through an
+environment variable that the shell passes by name only (`docker compose exec -e
+APP_DB_PASSWORD`), and the SQL arrives on standard input. Piping the password in
+from `cmd.exe` was rejected: each side of a `cmd.exe` pipe runs in a child process
+whose command line contains the already expanded text, which would put the password
+in the process list. One caveat: if the server is configured with
+`log_statement = 'ddl'` or `'all'`, the `ALTER ROLE` statement text, password
+included, would be logged. The default (`none`) does not.
+
+**What it does not cover.** A superuser or the table owner can still rewrite the
+log; that is outside what the application can control. There is no startup check
+that the connection is *not* a superuser or the owner. It is future work, along
+with keeping the owner credential out of the runtime environment (a deployment
+concern). Tables added by later migrations get no automatic grants: a new table is
+unreachable for `sentinel_app` until a migration grants it, which is the
+deny-by-default behaviour we want.
+
+## 10. Trusted proxies: `X-Forwarded-For` only, read from the right
+
+**Decision.** `TRUSTED_PROXIES` lists proxy IPs and CIDRs. Empty means the old
+behaviour: the key is the TCP peer and every forwarding header is ignored. If the
+peer is listed, the client is the rightmost `X-Forwarded-For` entry that is not
+itself a listed proxy. Only the per-IP limiter uses this.
+
+**Why `X-Forwarded-For` only.** It is the header an AWS load balancer appends to,
+and supporting `X-Real-IP` and `Forwarded` as well would be three parsers, three
+sets of spoofing rules and no benefit. A header Sentinel does not read cannot be
+abused.
+
+**Why right to left.** Each proxy appends the address it saw to the right. Entries
+to the left were written by the client or by hops we have no reason to trust, so
+the leftmost entry is exactly what an attacker controls. Walking from the right and
+skipping our own proxies stops at the first address nobody we trust vouched for, which
+is the real client as seen by our own infrastructure. Spoofed entries added on the
+left are never reached.
+
+**Why fail back to the peer address.** A missing, empty, malformed, over-long
+(more than 20 entries) or all-trusted header gives no safe answer, and the peer
+address is always safe: it can only cost precision (all clients share the proxy's
+bucket), never let a client choose its bucket. Every entry is parsed with
+`net/netip`; one bad entry rejects the whole header, and the raw string is never used
+as a key. The result is normalized (zone removed, IPv4-mapped IPv6 unmapped) so one
+client cannot get two buckets by spelling its address two ways.
+
+**Why reject `/0` at startup.** Trusting every address means every peer's header is
+believed, so the limiter is fully spoofable again, silently. That configuration is
+almost certainly a mistake, so the server refuses to start, with a message that names
+the entry's position and never repeats its value. Bad CIDRs, empty entries and lists
+over 64 entries are refused the same way.
+
+**Remaining limits.** Counters are still per process. IPv6 clients are keyed by full
+address, so one host with a /64 can use many addresses; limiting per /64 is future
+work. A list that is too wide (say a whole cloud region) trusts more than intended,
+and the header is only meaningful if the proxy really appends to it and Sentinel is
+not reachable except through that proxy.
+
+## 11. Container image
+
+**Decision.** A multi-stage `Dockerfile`: build `cmd/sentinel` and `cmd/migrate` with
+`CGO_ENABLED=0 -trimpath -ldflags "-s -w"` on the official `golang` image whose tag
+matches `go.mod`, then copy them and `migrations/` onto `distroless/static` (nonroot
+variant), both pinned by tag and digest. The user is numeric (`65532`), there is no
+shell, no `HEALTHCHECK` (the load balancer uses `GET /health`), and `cmd/tokengen`
+is never copied into the build, so it cannot ship. The migrate binary finds its SQL
+through the existing `MIGRATIONS_DIR` variable, set to `/app/migrations`; embedding
+the migrations in the binary was considered and left out because the existing
+setting already solves it with no code change. Secrets are only passed at run time.

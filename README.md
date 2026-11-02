@@ -64,8 +64,10 @@ Both are bound to 127.0.0.1.
    if (-not (Test-Path .env)) { Copy-Item .env.example .env }
    ```
 
-   Set a real `POSTGRES_PASSWORD` (and the same password inside `DATABASE_URL`),
-   and set `JWT_SECRET`, `JWT_ISSUER` and `JWT_AUDIENCE`. To create a strong secret:
+   Set a real `POSTGRES_PASSWORD` (and the same password inside
+   `MIGRATE_DATABASE_URL`), a separate `APP_DB_PASSWORD` (and the same password
+   inside `DATABASE_URL`, which connects as the `sentinel_app` role), and set
+   `JWT_SECRET`, `JWT_ISSUER` and `JWT_AUDIENCE`. To create a strong secret:
 
    ```powershell
    $b = New-Object byte[] 32; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b); [Convert]::ToBase64String($b)
@@ -73,16 +75,19 @@ Both are bound to 127.0.0.1.
 
    `.env` is git-ignored. Only `.env.example` (placeholders) is committed.
 
-2. Start Postgres and Redis, apply the migrations, run the server:
+2. Start Postgres and Redis, apply the migrations, give the app role its password,
+   run the server:
 
    ```powershell
    make up
    make migrate-up
+   make db-app-role
    make run
    ```
 
    `make` loads `.env` by itself. Migrations are never run automatically at
-   startup. The server refuses to start without `JWT_SECRET` (at least 32
+   startup. `make db-app-role` is needed once after the first `make migrate-up`
+   (and again after a `make migrate-down`, which drops the role); see Database roles. The server refuses to start without `JWT_SECRET` (at least 32
    characters), `JWT_ISSUER`, `JWT_AUDIENCE` and `DATABASE_URL`.
 
 3. In a second PowerShell window, mint a dev token and call the API:
@@ -120,8 +125,9 @@ Press Ctrl+C to stop the server; it shuts down gracefully.
 |-------------------------|----------------------------------------------|---------------------------------------------------------|
 | `make up`               | start Postgres and Redis                     | `docker compose up -d`                                  |
 | `make down`             | stop and remove the containers               | `docker compose down`                                   |
-| `make migrate-up`       | apply migrations                             | `go run ./cmd/migrate up`                               |
+| `make migrate-up`       | apply migrations (as the owner)              | `go run ./cmd/migrate up`                               |
 | `make migrate-down`     | revert all migrations (**deletes data**)     | `go run ./cmd/migrate down`                             |
+| `make db-app-role`      | set the `sentinel_app` login password from `APP_DB_PASSWORD` | `Get-Content scripts/set_app_role_password.sql \| docker compose exec -T -e APP_DB_PASSWORD postgres psql -q -U sentinel -d sentinel` |
 | `make run`              | run the server                               | `go run ./cmd/sentinel`                                 |
 | `make token`            | print a dev JWT, all scopes (local testing only) | `go run ./cmd/tokengen`                                 |
 | `make test`             | unit tests (plus store tests if the DB is up)| `go test ./...`                                         |
@@ -146,11 +152,19 @@ database volume.
 
 - `make test` runs the unit tests. The Postgres store and audit tests run only
   when `DATABASE_URL` is set and the database is up and migrated; otherwise they skip.
+  `DATABASE_URL` is the `sentinel_app` role. The audit test that proves the
+  append-only triggers also needs the owner connection (`MIGRATE_DATABASE_URL`).
 - `make test-integration` starts the real HTTP stack in-process against the
   docker-compose Postgres and Redis. It mints a JWT, creates a role, resource and
   permission, grants, assigns, authorizes, revokes, authorizes again and checks the
   `audit_log` rows. It also runs with the cache off and with Redis unreachable.
   It skips unless `DATABASE_URL` and `REDIS_URL` are set.
+- The privilege tests (`TestAppRoleRunsTheService`, `TestAppRolePrivileges`) connect
+  as `sentinel_app` and check that the service works while `UPDATE`, `DELETE`,
+  `TRUNCATE`, `DROP TRIGGER`, `CREATE TABLE` and reading `schema_migrations` are
+  all refused. They read `APP_DATABASE_URL` and skip when it is unset;
+  `make test-integration` sets it to `DATABASE_URL` by default. They fail if
+  `APP_DATABASE_URL` does not connect as the non-superuser `sentinel_app`.
 - The audit log is append-only, so test and benchmark runs leave rows in it.
   `make migrate-down` then `make migrate-up` clears them (and all other data).
 
@@ -161,7 +175,11 @@ All settings come from environment variables (see `.env.example`).
 | Variable             | Default                    | Notes                                              |
 |----------------------|----------------------------|----------------------------------------------------|
 | `SENTINEL_ADDR`      | `:8080`                    | HTTP listen address                                |
-| `DATABASE_URL`       | none (required)            | PostgreSQL connection string                       |
+| `DATABASE_URL`       | none (required)            | PostgreSQL connection string for the **server**: the `sentinel_app` role (see Database roles) |
+| `MIGRATE_DATABASE_URL` | falls back to `DATABASE_URL` | database **owner** connection, used only by `cmd/migrate` (`make migrate-up` / `migrate-down`) |
+| `APP_DB_PASSWORD`    | none                       | login password for `sentinel_app`, read only by `make db-app-role` (at least 16 characters) |
+| `APP_DATABASE_URL`   | none                       | `sentinel_app` connection for the privilege tests; `make test-integration` defaults it to `DATABASE_URL` |
+| `TRUSTED_PROXIES`    | empty                      | comma-separated IPs and CIDRs whose `X-Forwarded-For` the IP limiter believes (see Rate limiting) |
 | `REDIS_URL`          | `redis://localhost:6379/0` | Redis connection URL                               |
 | `CACHE_TTL_SECONDS`  | `60`                       | whole seconds, 0 to 3600; `0` turns the cache off  |
 | `JWT_SECRET`         | none (required)            | HS256 signing key, at least 32 characters          |
@@ -205,17 +223,113 @@ Things to know:
   are swept during normal calls (no background goroutine). A client that fills
   the table with many addresses can therefore push out other keys, which then
   start again with a full bucket.
-- **The client IP is the TCP peer address (`r.RemoteAddr`) and nothing else.**
-  `X-Forwarded-For`, `X-Real-IP` and `Forwarded` are ignored on purpose: the client
-  controls them, so honoring them would let anyone dodge the limit by changing a
-  header. The consequence is that behind a reverse proxy or load balancer every
-  client shares the proxy's address and therefore one IP budget. Running behind a
-  proxy needs a trusted-proxy design (only believing the header from known proxy
-  addresses), which is not built yet. IPv6 clients are limited per full address,
-  not per network prefix.
+- **The client IP is the TCP peer address (`r.RemoteAddr`) unless the peer is a
+  trusted proxy.** With `TRUSTED_PROXIES` empty (the default) `X-Forwarded-For`,
+  `X-Real-IP` and `Forwarded` are ignored: the client controls them, so honoring
+  them would let anyone dodge the limit by changing a header. Behind a load
+  balancer that means every client shares the balancer's address and one IP
+  budget, so set `TRUSTED_PROXIES` to the balancer's addresses (see below).
+  IPv6 clients are limited per full address, not per network prefix.
 - **Logging.** Rejections are not logged one by one: at most one generic line per
   key per minute, with the route pattern and the IP or subject quoted. Tokens are
   never logged.
+
+### Behind a load balancer (`TRUSTED_PROXIES`)
+
+Set `TRUSTED_PROXIES` to the addresses of the proxies that sit directly in front
+of Sentinel, for example `10.0.0.0/16` for a load balancer's subnet. It takes a
+comma-separated list of IPs and CIDR ranges, IPv4 and IPv6, at most 64 entries.
+
+- If the TCP peer is **not** in the list, headers are ignored exactly as before,
+  so a client cannot invent a fresh bucket by sending `X-Forwarded-For`.
+- If the peer **is** in the list, only `X-Forwarded-For` is read (never
+  `X-Real-IP` or `Forwarded`). Several header lines are joined, the list is
+  walked from the **right**, trusted proxies are skipped, and the first
+  untrusted address is the client. Anything written further left is ignored,
+  because the client can put anything there.
+- A header that is missing, empty, has an unparseable entry (including entries
+  with a port), has more than 20 entries, or lists only trusted proxies makes
+  the limiter fall back to the peer address. The result is normalized (IPv6 zone
+  removed, IPv4-mapped IPv6 written as IPv4) before it becomes the key.
+- The server refuses to start on an entry it cannot parse, an empty entry, a range
+  that covers everything (`0.0.0.0/0`, `::/0`: it would trust every client and make
+  the header fully spoofable) or more than 64 entries. The message names the
+  position, not the value.
+
+Only the per-IP limiter uses this. The per-caller limiter still keys on the token
+subject. The rules above only help if the proxy really overwrites or appends to
+`X-Forwarded-For` (an AWS Application Load Balancer appends the address it saw) and
+if the container is not reachable except through it.
+
+## Database roles
+
+Sentinel uses two database roles:
+
+| Role | Used by | Can do |
+|------|---------|--------|
+| the **owner** (`MIGRATE_DATABASE_URL`) | `cmd/migrate` only | everything, including creating tables and triggers |
+| `sentinel_app` (`DATABASE_URL`) | the server and the tests | `SELECT`/`INSERT`/`UPDATE`/`DELETE` on the five policy tables; `SELECT` and `INSERT` only on `audit_log`; use their sequences |
+
+The `sentinel_app` role is created by migration `000004` as `NOLOGIN`, with no
+password in any file. It has no `UPDATE`, `DELETE`, `TRUNCATE`, `REFERENCES` or
+`TRIGGER` on `audit_log`, no access to `schema_migrations`, and cannot create
+anything in the schema. `make db-app-role` gives it a login password from
+`APP_DB_PASSWORD` in `.env`: the password is passed to `psql` through the
+environment (docker is given only the variable's name, not its value) and the SQL
+comes from standard input, so the password never appears in a command line or in
+`make` output. The password must be at least 16 characters.
+
+**Why two roles.** The append-only triggers stop `UPDATE`, `DELETE` and `TRUNCATE`,
+but whoever owns the table can simply `DROP TRIGGER` first. If the service runs as
+the owner, a bug or a stolen service credential can erase its own audit trail. With
+a separate role, the database itself refuses: the app role does not own the table,
+so it cannot drop or disable the triggers, and it was never given the privileges the
+triggers guard. The triggers still matter, because they also stop the owner's
+accidental changes.
+
+**What this does not cover.** A superuser or the table owner is outside the app's
+control and can still rewrite the log. (The docker-compose `POSTGRES_USER` is a
+superuser, which is fine on a laptop; in a real deployment the owner should be a
+dedicated non-superuser and its credential kept away from the service.) Sentinel
+does not check at startup that it is *not* connected as a superuser or the owner;
+that check is future work. Tables added by later migrations need their own `GRANT`
+for `sentinel_app`; nothing is granted by default.
+
+## Container
+
+The `Dockerfile` builds `cmd/sentinel` and `cmd/migrate` (not `cmd/tokengen`) into a
+static binary pair on a pinned `distroless/static` image that runs as the numeric
+non-root user `65532` and has no shell. It contains no secrets: pass settings when
+you run it.
+
+```powershell
+docker build -t sentinel .
+```
+
+Run the server. The container must be started with the **app-role** `DATABASE_URL`
+(`sentinel_app`), never the owner's. Inside Docker Desktop, reach services on the
+host as `host.docker.internal`:
+
+```powershell
+docker run --rm -p 8080:8080 `
+  -e DATABASE_URL="postgres://sentinel_app:<APP_DB_PASSWORD>@host.docker.internal:5433/sentinel?sslmode=disable" `
+  -e REDIS_URL="redis://host.docker.internal:6379/0" `
+  -e JWT_SECRET="<at least 32 characters>" -e JWT_ISSUER=sentinel-dev -e JWT_AUDIENCE=sentinel-api `
+  sentinel
+```
+
+Run migrations from the same image by overriding the entrypoint, with the **owner**
+URL:
+
+```powershell
+docker run --rm --entrypoint /app/migrate `
+  -e MIGRATE_DATABASE_URL="postgres://sentinel:<POSTGRES_PASSWORD>@host.docker.internal:5433/sentinel?sslmode=disable" `
+  sentinel up
+```
+
+The SQL files are in `/app/migrations` (`MIGRATIONS_DIR` is already set). The image
+has no `HEALTHCHECK` because it has no shell or `curl`; point the load balancer's
+health check at `GET /health` (port 8080).
 
 ## Authentication
 
@@ -415,6 +529,9 @@ anyone who holds `JWT_SECRET` can mint a token with any scope (see Limitations).
 - **Append-only audit log.** One row per decision, allow or deny, including cache
   hits. Database triggers reject `UPDATE`, `DELETE` and `TRUNCATE`. If the audit
   write fails the response is a `500` and the decision is withheld (fail closed).
+- **Least-privilege database role.** The server connects as `sentinel_app`, which can
+  only `SELECT` and `INSERT` on `audit_log` and cannot drop its triggers (see Database
+  roles).
 - **No leaks.** Internal errors are logged server-side and replaced by a fixed
   message. Denial reasons never reveal a user's roles.
 - **Secrets.** Configuration comes from environment variables. Only
@@ -456,12 +573,14 @@ loaded or slower than this local setup; it was not measured here.
 - Single instance. The cache's failure handling (the 5 second skip and the
   skip-for-one-TTL after a failed invalidation) is kept in memory per process; with
   several instances it would need to be shared.
-- Rate limits are per process and in memory, and the client IP is the TCP peer
-  address, so they do not add up across instances and behind a proxy all clients
-  look like one (see Rate limiting). Redis memory is still not capped: a caller
+- Rate limits are per process and in memory, so they do not add up across
+  instances. Behind a proxy the client IP comes from `X-Forwarded-For` only for
+  peers listed in `TRUSTED_PROXIES`, and IPv6 clients are limited per full address,
+  not per /64 (see Rate limiting). Redis memory is still not capped: a caller
   can create many cache entries within its rate limit, and they expire after the TTL.
-- The audit table owner can still drop the triggers; a separate low-privilege
-  database role for the app would harden this.
+- The service runs as the low-privilege `sentinel_app` role, which cannot touch
+  the audit triggers, but a superuser or the table owner still can (see Database
+  roles). Sentinel does not yet check at startup that it is not connected as one.
 - List endpoints have no pagination.
 - Redis is trusted: cache entries are not signed, so Redis must stay on a private network.
 
@@ -470,7 +589,9 @@ loaded or slower than this local setup; it was not measured here.
 ```
 cmd/sentinel      server entry point
 cmd/migrate       runs the SQL migrations
-cmd/tokengen      mints a dev JWT for local testing
+cmd/tokengen      mints a dev JWT for local testing (not in the container image)
+Dockerfile        multi-stage build of sentinel and migrate on distroless
+scripts/          SQL run by make db-app-role and by CI
 migrations/       plain SQL up/down files (golang-migrate)
 docs/DECISIONS.md short design-decision records
 internal/config   environment-based config
@@ -481,5 +602,6 @@ internal/auth     JWT validation and middleware
 internal/audit    append-only audit log
 internal/cache    Redis decision cache and invalidating store wrapper
 internal/ratelimit  in-memory token-bucket rate limiter
+internal/clientip trusted-proxy handling for the per-IP limiter
 internal/integration  full-stack tests and benchmarks (build tag: integration)
 ```
