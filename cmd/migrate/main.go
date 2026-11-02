@@ -1,5 +1,7 @@
 // Command migrate applies or reverts the SQL files in the migrations folder.
 // Usage: go run ./cmd/migrate up|down
+//
+// It connects with MIGRATE_DATABASE_URL (the database owner), or DATABASE_URL if that is unset.
 package main
 
 import (
@@ -24,9 +26,16 @@ func run(args []string, getenv func(string) string) error {
 	if len(args) != 1 || (args[0] != "up" && args[0] != "down") {
 		return errors.New("usage: migrate up|down")
 	}
-	dbURL := getenv("DATABASE_URL")
+	// Migrations create tables, triggers and roles, so they need the owner
+	// connection. The server's DATABASE_URL is the low-privilege app role, which
+	// cannot do that; MIGRATE_DATABASE_URL is the owner. Without it we fall back
+	// to DATABASE_URL, so a setup with one connection keeps working.
+	dbURL := getenv("MIGRATE_DATABASE_URL")
 	if dbURL == "" {
-		return errors.New("DATABASE_URL is required")
+		dbURL = getenv("DATABASE_URL")
+	}
+	if dbURL == "" {
+		return errors.New("MIGRATE_DATABASE_URL or DATABASE_URL is required")
 	}
 	// golang-migrate picks its driver from the URL scheme; "pgx5" selects the pgx v5 driver.
 	dbURL = strings.Replace(dbURL, "postgres://", "pgx5://", 1)
