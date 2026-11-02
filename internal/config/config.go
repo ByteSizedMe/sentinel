@@ -55,6 +55,10 @@ type Config struct {
 
 	RateLimit RateLimit
 
+	// AllowPrivilegedDBRole lets the server start even though DATABASE_URL
+	// connects as a superuser or the audit_log owner. Local development only.
+	AllowPrivilegedDBRole bool
+
 	// TrustedProxies are the proxies whose X-Forwarded-For header the per-IP rate
 	// limiter believes. Nil (the default) trusts nobody.
 	TrustedProxies *clientip.Trusted
@@ -77,6 +81,8 @@ var (
 	// The message never includes the value that was set.
 	ErrInvalidRateLimit = errors.New("config: invalid rate limit setting")
 
+	ErrInvalidAllowPrivileged = errors.New("config: ALLOW_PRIVILEGED_DB_ROLE must be true or false")
+
 	// ErrInvalidTrustedProxies wraps the reason from clientip.Parse. The message
 	// never includes the list that was set.
 	ErrInvalidTrustedProxies = errors.New("config: invalid TRUSTED_PROXIES")
@@ -98,16 +104,21 @@ func Load(getenv func(string) string) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("%w: %w", ErrInvalidTrustedProxies, err)
 	}
+	allowPrivileged, err := parseAllowPrivileged(getenv("ALLOW_PRIVILEGED_DB_ROLE"))
+	if err != nil {
+		return Config{}, err
+	}
 	cfg := Config{
-		RateLimit:      limits,
-		TrustedProxies: proxies,
-		Addr:           valueOr(getenv("SENTINEL_ADDR"), ":8080"),
-		DatabaseURL:    strings.TrimSpace(getenv("DATABASE_URL")),
-		RedisURL:       valueOr(getenv("REDIS_URL"), "redis://localhost:6379/0"),
-		CacheTTL:       ttl,
-		JWTSecret:      strings.TrimSpace(getenv("JWT_SECRET")),
-		JWTIssuer:      strings.TrimSpace(getenv("JWT_ISSUER")),
-		JWTAudience:    strings.TrimSpace(getenv("JWT_AUDIENCE")),
+		AllowPrivilegedDBRole: allowPrivileged,
+		RateLimit:             limits,
+		TrustedProxies:        proxies,
+		Addr:                  valueOr(getenv("SENTINEL_ADDR"), ":8080"),
+		DatabaseURL:           strings.TrimSpace(getenv("DATABASE_URL")),
+		RedisURL:              valueOr(getenv("REDIS_URL"), "redis://localhost:6379/0"),
+		CacheTTL:              ttl,
+		JWTSecret:             strings.TrimSpace(getenv("JWT_SECRET")),
+		JWTIssuer:             strings.TrimSpace(getenv("JWT_ISSUER")),
+		JWTAudience:           strings.TrimSpace(getenv("JWT_AUDIENCE")),
 	}
 
 	// None of these have a default on purpose: silently falling back to some
@@ -125,6 +136,19 @@ func Load(getenv func(string) string) (Config, error) {
 		return Config{}, ErrMissingJWTAudience
 	}
 	return cfg, nil
+}
+
+// parseAllowPrivileged reads ALLOW_PRIVILEGED_DB_ROLE. Only an exact "true"
+// turns the override on; empty means off, and anything else is an error rather
+// than a guess, so a typo cannot quietly change the safety setting either way.
+func parseAllowPrivileged(v string) (bool, error) {
+	switch strings.TrimSpace(v) {
+	case "", "false":
+		return false, nil
+	case "true":
+		return true, nil
+	}
+	return false, ErrInvalidAllowPrivileged
 }
 
 // valueOr returns def when v is empty or only whitespace.

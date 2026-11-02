@@ -231,3 +231,38 @@ func TestLoadTrustedProxies(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadAllowPrivilegedDBRole(t *testing.T) {
+	tests := []struct {
+		value   string
+		want    bool
+		wantErr bool
+	}{
+		{"", false, false},
+		{"  ", false, false},
+		{"false", false, false},
+		{"true", true, false},
+		{" true ", true, false},
+		{"TRUE", false, true},
+		{"1", false, true},
+		{"yes", false, true},
+	}
+	for _, tt := range tests {
+		t.Run("value "+tt.value, func(t *testing.T) {
+			env := baseEnv(map[string]string{"ALLOW_PRIVILEGED_DB_ROLE": tt.value})
+			got, err := Load(func(k string) string { return env[k] })
+			if tt.wantErr {
+				if !errors.Is(err, ErrInvalidAllowPrivileged) {
+					t.Fatalf("error = %v, want ErrInvalidAllowPrivileged", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got.AllowPrivilegedDBRole != tt.want {
+				t.Errorf("AllowPrivilegedDBRole = %v, want %v", got.AllowPrivilegedDBRole, tt.want)
+			}
+		})
+	}
+}
