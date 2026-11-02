@@ -1,0 +1,33 @@
+# Nothing private or local belongs in the build context.
+.git
+.gitignore
+.github
+
+# Secrets and local config (.env.example is documentation, not needed in the image)
+.env
+.env.*
+
+# Private notes
+docs/learning/
+
+# Not needed to build or run
+docs/
+README.md
+Makefile
+docker-compose.yml
+Dockerfile
+.dockerignore
+scripts/
+cmd/tokengen/
+
+# Editors, OS files, test and build leftovers
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+bin/
+*.exe
+*.test
+*.out
+*.log
