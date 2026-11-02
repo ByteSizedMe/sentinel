@@ -98,7 +98,7 @@ func newRouter(store rbac.PolicyStore, audits audit.Logger, tokens *auth.Validat
 		//   2. JWT check: 401 for a missing or bad token (those never reach 3),
 		//   3. per-caller limit: keyed by the token subject, so 403s count too,
 		//   4. scope check, then the handler (added per route below).
-		r.Use(limitByIP(limits.IP, logs))
+		r.Use(limitByIP(limits.IP, limits.Proxies, logs))
 		r.Use(auth.Middleware(tokens))
 		r.Use(limitByCaller(limits.Caller, logs))
 

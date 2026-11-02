@@ -184,3 +184,50 @@ func TestLoadRateLimit(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadTrustedProxies(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		wantLen int
+		wantErr bool
+	}{
+		{"unset", "", 0, false},
+		{"blank", "   ", 0, false},
+		{"bare IPs and CIDRs", "10.0.0.1, 192.0.2.0/24,2001:db8::/32", 3, false},
+		{"the cap", strings.TrimSuffix(strings.Repeat("10.0.0.1,", 64), ","), 64, false},
+		{"over the cap", strings.Repeat("10.0.0.1,", 64) + "10.0.0.2", 0, true},
+		{"IPv4 /0", "0.0.0.0/0", 0, true},
+		{"IPv6 /0", "::/0", 0, true},
+		{"bad CIDR", "10.0.0.0/40", 0, true},
+		{"not an address", "my-load-balancer", 0, true},
+		{"empty entry", "10.0.0.1,,10.0.0.2", 0, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := baseEnv(map[string]string{"TRUSTED_PROXIES": tt.value})
+			got, err := Load(func(k string) string { return env[k] })
+			if tt.wantErr {
+				if !errors.Is(err, ErrInvalidTrustedProxies) {
+					t.Fatalf("error = %v, want ErrInvalidTrustedProxies", err)
+				}
+				if !strings.Contains(err.Error(), "TRUSTED_PROXIES") {
+					t.Errorf("error %q does not name the variable", err)
+				}
+				if strings.Contains(err.Error(), "my-load-balancer") {
+					t.Errorf("error repeats the value: %v", err)
+				}
+				if got != (Config{}) {
+					t.Errorf("config = %+v, want zero value on error", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if n := got.TrustedProxies.Len(); n != tt.wantLen {
+				t.Errorf("trusted ranges = %d, want %d", n, tt.wantLen)
+			}
+		})
+	}
+}

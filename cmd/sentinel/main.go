@@ -67,6 +67,7 @@ func run() error {
 
 	// Rate limits are in memory and per process (see the README).
 	limits := httpapi.Limits{
+		Proxies: cfg.TrustedProxies,
 		IP: ratelimit.New(ratelimit.Config{
 			Rate: float64(cfg.RateLimit.IPRPS), Burst: cfg.RateLimit.IPBurst, MaxKeys: cfg.RateLimit.MaxKeys,
 		}),
@@ -74,7 +75,7 @@ func run() error {
 			Rate: float64(cfg.RateLimit.CallerRPS), Burst: cfg.RateLimit.CallerBurst, MaxKeys: cfg.RateLimit.MaxKeys,
 		}),
 	}
-	log.Printf("rate limiting: per-IP %s, per-caller %s", onOff(limits.IP), onOff(limits.Caller))
+	log.Printf("rate limiting: per-IP %s, per-caller %s, trusted proxies %d", onOff(limits.IP), onOff(limits.Caller), cfg.TrustedProxies.Len())
 
 	srv := &http.Server{
 		Addr:    cfg.Addr,

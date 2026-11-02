@@ -10,6 +10,7 @@ import (
 
 	"github.com/bytesizedme/sentinel/internal/audit"
 	"github.com/bytesizedme/sentinel/internal/auth"
+	"github.com/bytesizedme/sentinel/internal/clientip"
 	"github.com/bytesizedme/sentinel/internal/ratelimit"
 )
 
@@ -53,6 +54,12 @@ const defaultAddr = "192.0.2.1:4000"
 
 func newLimited(t *testing.T, ip, caller bucketCfg) *limited {
 	t.Helper()
+	return newLimitedBehind(t, ip, caller, nil)
+}
+
+// newLimitedBehind is newLimited with a set of trusted proxies.
+func newLimitedBehind(t *testing.T, ip, caller bucketCfg, proxies *clientip.Trusted) *limited {
+	t.Helper()
 	clk := newLimitClock()
 	mk := func(c bucketCfg) *ratelimit.Limiter {
 		return ratelimit.New(ratelimit.Config{Rate: c.rate, Burst: c.burst, MaxKeys: 1000, Now: clk.Now})
@@ -61,7 +68,7 @@ func newLimited(t *testing.T, ip, caller bucketCfg) *limited {
 	if err != nil {
 		t.Fatal(err)
 	}
-	l := Limits{IP: mk(ip), Caller: mk(caller)}
+	l := Limits{IP: mk(ip), Caller: mk(caller), Proxies: proxies}
 	return &limited{h: newRouter(newFakeStore(), &audit.Memory{}, v, l, clk.Now), clock: clk, limits: l}
 }
 
@@ -344,25 +351,6 @@ func TestDisabledLimitersNeverRefuse(t *testing.T) {
 				if rec.Code != 200 {
 					t.Fatalf("call %d: status = %d, want 200", i+1, rec.Code)
 				}
-			}
-		})
-	}
-}
-
-func TestClientIP(t *testing.T) {
-	tests := []struct{ remote, want string }{
-		{"192.0.2.1:1234", "192.0.2.1"},
-		{"[2001:db8::1]:8080", "2001:db8::1"},
-		{"192.0.2.1", "192.0.2.1"}, // no port: used as is
-		{"@", "@"},                 // e.g. a unix socket peer
-		{"", ""},
-	}
-	for _, tt := range tests {
-		t.Run(tt.remote, func(t *testing.T) {
-			r := httptest.NewRequest(http.MethodGet, "/", nil)
-			r.RemoteAddr = tt.remote
-			if got := clientIP(r); got != tt.want {
-				t.Errorf("clientIP(%q) = %q, want %q", tt.remote, got, tt.want)
 			}
 		})
 	}

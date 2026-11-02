@@ -2,12 +2,12 @@ package httpapi
 
 import (
 	"log"
-	"net"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/bytesizedme/sentinel/internal/auth"
+	"github.com/bytesizedme/sentinel/internal/clientip"
 	"github.com/bytesizedme/sentinel/internal/ratelimit"
 )
 
@@ -16,6 +16,10 @@ import (
 type Limits struct {
 	IP     *ratelimit.Limiter // per client IP, before authentication
 	Caller *ratelimit.Limiter // per token subject, after authentication
+
+	// Proxies are the proxies whose X-Forwarded-For header may name the client
+	// for the IP limiter. Nil trusts nobody: the key is the TCP peer address.
+	Proxies *clientip.Trusted
 }
 
 // Rejections are logged at most once per key per minute, and at most this many
@@ -60,25 +64,17 @@ func tooManyRequests(w http.ResponseWriter, retryAfter time.Duration) {
 	writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many requests"})
 }
 
-// clientIP is the host part of r.RemoteAddr: the address of the TCP peer.
-// X-Forwarded-For, X-Real-IP and Forwarded are deliberately NOT read: the client
-// controls them, so honoring them would let anyone pick a fresh key per request
-// and walk around the limit. The cost is that behind a proxy or load balancer
-// every client shares the proxy's address (see the README).
-func clientIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr // no port to strip
-	}
-	return host
-}
-
 // limitByIP runs BEFORE authentication, so floods of requests with bad or
 // missing tokens are slowed down too.
-func limitByIP(l *ratelimit.Limiter, logs *rejectLog) func(http.Handler) http.Handler {
+//
+// The key is the TCP peer address unless that peer is one of the trusted
+// proxies, in which case it is the client named by X-Forwarded-For (see
+// internal/clientip). With no trusted proxies the headers are never read, so a
+// client cannot choose its own key.
+func limitByIP(l *ratelimit.Limiter, proxies *clientip.Trusted, logs *rejectLog) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ip := clientIP(r)
+			ip := proxies.Key(r)
 			if ok, retry := l.Allow(ip); !ok {
 				logs.rejected(r, "ip", ip)
 				tooManyRequests(w, retry)
