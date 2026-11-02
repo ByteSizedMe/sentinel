@@ -49,6 +49,16 @@ func run() error {
 	}
 	defer pool.Close()
 
+	// Refuse to run as a role that could rewrite the audit log (see the README,
+	// "Database roles"). cmd/migrate is not subject to this: it must be the owner.
+	warning, err := store.CheckRole(context.Background(), pool, cfg.AllowPrivilegedDBRole)
+	if err != nil {
+		return err
+	}
+	if warning != "" {
+		log.Print(warning)
+	}
+
 	// Policy store: Postgres, optionally fronted by the Redis decision cache.
 	// The client connects lazily, so Redis being down at startup is fine: every
 	// lookup then falls back to Postgres. (Never log REDIS_URL; it may hold a password.)

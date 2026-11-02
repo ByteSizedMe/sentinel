@@ -159,12 +159,19 @@ database volume.
   permission, grants, assigns, authorizes, revokes, authorizes again and checks the
   `audit_log` rows. It also runs with the cache off and with Redis unreachable.
   It skips unless `DATABASE_URL` and `REDIS_URL` are set.
+  **In CI (`CI=true`, which GitHub Actions sets) these tests never skip:** a missing
+  or unreachable database, Redis or `APP_DATABASE_URL` fails the test instead, so a
+  broken setup cannot pass unnoticed.
 - The privilege tests (`TestAppRoleRunsTheService`, `TestAppRolePrivileges`) connect
   as `sentinel_app` and check that the service works while `UPDATE`, `DELETE`,
-  `TRUNCATE`, `DROP TRIGGER`, `CREATE TABLE` and reading `schema_migrations` are
-  all refused. They read `APP_DATABASE_URL` and skip when it is unset;
+  `TRUNCATE`, `DROP TRIGGER`, `CREATE TABLE`, `CREATE FUNCTION`, `COPY ... TO PROGRAM`,
+  `SET ROLE` to the owner and reading `schema_migrations` are all refused, and the
+  role is not a superuser and has no `CREATEROLE`, `CREATEDB`, `REPLICATION` or
+  `BYPASSRLS`. They read `APP_DATABASE_URL` and skip locally when it is unset;
   `make test-integration` sets it to `DATABASE_URL` by default. They fail if
-  `APP_DATABASE_URL` does not connect as the non-superuser `sentinel_app`.
+  `APP_DATABASE_URL` does not connect as the non-superuser `sentinel_app`. The
+  migration `000005` test and the startup-guard test also need the owner connection
+  (`MIGRATE_DATABASE_URL`, a superuser in the local setup) and skip without it.
 - The audit log is append-only, so test and benchmark runs leave rows in it.
   `make migrate-down` then `make migrate-up` clears them (and all other data).
 
@@ -180,6 +187,7 @@ All settings come from environment variables (see `.env.example`).
 | `APP_DB_PASSWORD`    | none                       | login password for `sentinel_app`, read only by `make db-app-role` (at least 16 characters) |
 | `APP_DATABASE_URL`   | none                       | `sentinel_app` connection for the privilege tests; `make test-integration` defaults it to `DATABASE_URL` |
 | `TRUSTED_PROXIES`    | empty                      | comma-separated IPs and CIDRs whose `X-Forwarded-For` the IP limiter believes (see Rate limiting) |
+| `ALLOW_PRIVILEGED_DB_ROLE` | unset (`false`)  | `true` lets the server start as a superuser or the `audit_log` owner, with one warning; local development only |
 | `REDIS_URL`          | `redis://localhost:6379/0` | Redis connection URL                               |
 | `CACHE_TTL_SECONDS`  | `60`                       | whole seconds, 0 to 3600; `0` turns the cache off  |
 | `JWT_SECRET`         | none (required)            | HS256 signing key, at least 32 characters          |
@@ -257,9 +265,19 @@ comma-separated list of IPs and CIDR ranges, IPv4 and IPv6, at most 64 entries.
   position, not the value.
 
 Only the per-IP limiter uses this. The per-caller limiter still keys on the token
-subject. The rules above only help if the proxy really overwrites or appends to
-`X-Forwarded-For` (an AWS Application Load Balancer appends the address it saw) and
-if the container is not reachable except through it.
+subject.
+
+**Limit: a proxy that does not append.** The rules above only help if the trusted
+proxy really appends the address it saw to `X-Forwarded-For` (an AWS Application Load
+Balancer does, by its documentation). If a trusted peer passes the header through
+unchanged, a client behind it can choose its own key by sending any value, which gives
+it a fresh bucket per value. Once `RATE_LIMIT_MAX_KEYS` keys are tracked, the least
+recently seen key is dropped, so such a client can also push other clients' keys out;
+they then start again with a full bucket. The key table itself stays capped; this
+document makes no claim about how much memory that is in practice. **Mitigation:**
+put only the load balancer's own address range in `TRUSTED_PROXIES` (not a wide
+network), and keep the service unreachable except through the load balancer
+(security groups or equivalent), so no one else can connect as a trusted peer.
 
 ## Database roles
 
@@ -277,7 +295,14 @@ anything in the schema. `make db-app-role` gives it a login password from
 `APP_DB_PASSWORD` in `.env`: the password is passed to `psql` through the
 environment (docker is given only the variable's name, not its value) and the SQL
 comes from standard input, so the password never appears in a command line or in
-`make` output. The password must be at least 16 characters.
+`make` output. The password must be at least 16 characters, and the script refuses
+the placeholders from `.env.example`.
+
+Migration `000005` re-applies the role's attributes (no superuser, `CREATEDB`,
+`CREATEROLE`, replication or `BYPASSRLS`) and its grants every time migrations run,
+so a `sentinel_app` role that already existed before `000004`, or was changed by
+hand, is put back. It does not touch the password or `LOGIN`. Changing a superuser
+role needs a superuser, so run migrations with the owner connection.
 
 **Why two roles.** The append-only triggers stop `UPDATE`, `DELETE` and `TRUNCATE`,
 but whoever owns the table can simply `DROP TRIGGER` first. If the service runs as
@@ -287,13 +312,69 @@ so it cannot drop or disable the triggers, and it was never given the privileges
 triggers guard. The triggers still matter, because they also stop the owner's
 accidental changes.
 
-**What this does not cover.** A superuser or the table owner is outside the app's
-control and can still rewrite the log. (The docker-compose `POSTGRES_USER` is a
-superuser, which is fine on a laptop; in a real deployment the owner should be a
-dedicated non-superuser and its credential kept away from the service.) Sentinel
-does not check at startup that it is *not* connected as a superuser or the owner;
-that check is future work. Tables added by later migrations need their own `GRANT`
-for `sentinel_app`; nothing is granted by default.
+**Startup guard.** After connecting, the server checks which role it is. If that
+role is a superuser, owns `audit_log` or inherits the owner's privileges, the server
+refuses to start, with a message that names the problem but never the connection
+string. Setting `ALLOW_PRIVILEGED_DB_ROLE=true` lets it start anyway and logs one
+warning line. That override is for local development only: never set it in a real
+deployment. `cmd/migrate` is not subject to the guard, since it has to be the owner.
+This lowers the chance of running as the wrong role by mistake; it does not remove
+the underlying limit below.
+
+**What the app role can still do.** Read this before relying on the audit log:
+
+- It can `INSERT` any row into `audit_log`, including a forged decision such as
+  `allowed = true`. The database only checks that `source` is `db` or `cache`. A
+  stolen service credential can therefore add misleading history, though it cannot
+  edit or delete what is already there.
+- It can read the whole audit log, not just its own rows.
+- `PUBLIC` keeps the `TEMP` privilege on the database, so the role can create
+  temporary tables. They live only for the session and are not in the schema.
+- Migration `000004` runs `REVOKE CREATE ON SCHEMA public FROM PUBLIC`. That applies
+  to every role in that database, not only `sentinel_app`.
+- A superuser or the table owner is outside the app's control and can still rewrite
+  the log. (The docker-compose `POSTGRES_USER` is a superuser, which is fine on a
+  laptop; in a real deployment the owner should be a dedicated non-superuser and its
+  credential kept away from the service.) The startup guard only stops Sentinel
+  itself from running as one of them.
+- Tables added by later migrations need their own `GRANT` for `sentinel_app`;
+  nothing is granted by default.
+
+### Running against a managed database (for example RDS)
+
+`make db-app-role` runs `psql` inside the local compose container, so it does not
+apply to a managed database. The same SQL file works from any machine that has
+`psql` and can reach the database:
+
+1. Run the migrations with the **owner** (admin) URL only:
+   `MIGRATE_DATABASE_URL=... go run ./cmd/migrate up` (or the container's
+   `/app/migrate`, see Container). That also creates the `sentinel_app` role, without
+   a password.
+2. Set the app role's password with the same file, from a machine that has `psql`
+   and a POSIX shell (Linux, macOS, WSL or Git Bash: the script reads the password
+   with `printenv`, which `psql` runs through the local shell). Supply the password
+   and the admin login through the environment and the SQL through standard input,
+   never on the command line:
+
+   ```bash
+   export APP_DB_PASSWORD='<your own random value, at least 16 characters>'
+   export PGPASSWORD='<the admin password>'
+   psql -q -h <host> -U <admin user> -d <database> < scripts/set_app_role_password.sql
+   ```
+
+   This is what CI does too. Avoid putting a full connection URL with a password in
+   the `psql` arguments, because arguments are visible to other processes.
+3. Give the service the **app** URL as `DATABASE_URL` (the `sentinel_app` user and
+   its password), never the owner URL. The owner URL belongs only to whatever runs
+   migrations.
+4. Use TLS. Every connection string in this README uses `sslmode=disable` because it
+   points at a container on the same machine. For a managed database use
+   `sslmode=require`, or `sslmode=verify-full` with the provider's CA certificate,
+   in both URLs.
+
+Privileges that managed services restrict (for example changing a superuser role)
+may need the provider's admin role instead of a true superuser; migration `000005`
+only does that change if the role already exists.
 
 ## Container
 
@@ -579,8 +660,10 @@ loaded or slower than this local setup; it was not measured here.
   not per /64 (see Rate limiting). Redis memory is still not capped: a caller
   can create many cache entries within its rate limit, and they expire after the TTL.
 - The service runs as the low-privilege `sentinel_app` role, which cannot touch
-  the audit triggers, but a superuser or the table owner still can (see Database
-  roles). Sentinel does not yet check at startup that it is not connected as one.
+  the audit triggers, and the server refuses to start as a superuser or the table
+  owner unless the local-development override is set. A superuser or the owner can
+  still rewrite the log, and `sentinel_app` can still insert arbitrary audit rows and
+  read the whole log (see Database roles).
 - List endpoints have no pagination.
 - Redis is trusted: cache entries are not signed, so Redis must stay on a private network.
 

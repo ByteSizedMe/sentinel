@@ -200,9 +200,9 @@ included, would be logged. The default (`none`) does not.
 
 **What it does not cover.** A superuser or the table owner can still rewrite the
 log; that is outside what the application can control. There is no startup check
-that the connection is *not* a superuser or the owner. It is future work, along
-with keeping the owner credential out of the runtime environment (a deployment
-concern). Tables added by later migrations get no automatic grants: a new table is
+that the connection is *not* a superuser or the owner. Section 13 adds that check;
+keeping the owner credential out of the runtime environment remains a deployment
+concern. Tables added by later migrations get no automatic grants: a new table is
 unreachable for `sentinel_app` until a migration grants it, which is the
 deny-by-default behaviour we want.
 
@@ -256,3 +256,50 @@ is never copied into the build, so it cannot ship. The migrate binary finds its 
 through the existing `MIGRATIONS_DIR` variable, set to `/app/migrations`; embedding
 the migrations in the binary was considered and left out because the existing
 setting already solves it with no code change. Secrets are only passed at run time.
+
+## 12. CI fails instead of skipping the privilege tests
+
+**Decision.** The integration helpers call `skipOrFail` when something they need is
+missing or unreachable (`APP_DATABASE_URL`, `REDIS_URL`, the database, Redis, the
+owner URL). Locally that is a skip with a message, so `go test` still works without
+Docker. When `CI=true` (GitHub Actions sets it) it is a failure.
+
+**Why.** The privilege tests are the only proof that the app role cannot touch the
+audit log. A skip reports success, so a broken app-role login in CI would have turned
+them off without anyone noticing. A test that guards a security property should not be
+able to go quiet. The decision itself is unit-tested (`TestSkipOrFail`). Only the exact
+value `true` counts as CI, which is what GitHub sets; no workflow change was needed.
+
+**Cost.** The same tests fail for a contributor who sets `CI=true` locally without a
+database. That is intended.
+
+## 13. Migration 000005 and the startup guard
+
+**Decision.** Migration `000004` is not edited (it may already have run). Migration
+`000005` runs `ALTER ROLE sentinel_app NOSUPERUSER NOCREATEDB NOCREATEROLE
+NOREPLICATION NOBYPASSRLS` if the role exists, then revokes and re-grants exactly
+what `000004` grants. It leaves the password and `LOGIN` alone, and its down
+migration does nothing, because undoing it must never weaken the role. At startup the
+server asks the database whether the connected role is a superuser, or owns
+`audit_log` or inherits the owner's privileges (`pg_has_role(..., 'USAGE')`). If so it
+refuses to start unless `ALLOW_PRIVILEGED_DB_ROLE=true`, which allows it with one
+warning line.
+
+**Why.** `000004` only creates a missing role, so a `sentinel_app` that already
+existed (a leftover, or made by hand with extra rights) kept its attributes and
+silently defeated the protection. And nothing stopped an operator from putting the
+owner URL in `DATABASE_URL`: the service ran, with no sign that the audit log was
+unprotected. The first is fixed where the role is defined, the second where the
+service starts, because either mistake is easy and invisible.
+
+**Choices.** The override is a separate variable that must be exactly `true` (any other
+value is a config error, so a typo cannot flip the setting either way), is commented out
+in `.env.example`, and is documented as local development only. Membership in the owner
+role counts as privileged, since it gives the same power. A failed check is an error,
+not a pass. `cmd/migrate` has no guard: it is supposed to be the owner. The guard is
+a safety net, not a boundary: a superuser can still change the log, and the app role
+can still insert arbitrary rows and read the whole log (README, Database roles).
+
+**Password placeholders.** `scripts/set_app_role_password.sql` refuses the public
+placeholders from `.env.example` by name, as well as anything under 16 characters, so
+copying the example file unchanged cannot produce a role with a known password.

@@ -7,8 +7,14 @@
 \set ON_ERROR_STOP on
 \set pw `printenv APP_DB_PASSWORD`
 
-SELECT length(:'pw') >= 16 AS pw_ok \gset
-\if :pw_ok
+-- The placeholders from .env.example are public, so they are refused by name
+-- (a clearer message than the length check below, and still refused if a
+-- placeholder is ever lengthened).
+SELECT :'pw' IN ('change-me', 'change-me-app-password') AS pw_placeholder,
+       length(:'pw') >= 16 AS pw_long \gset
+\if :pw_placeholder
+    DO $$ BEGIN RAISE EXCEPTION 'APP_DB_PASSWORD is still the placeholder from .env.example; set your own'; END $$;
+\elif :pw_long
     ALTER ROLE sentinel_app LOGIN PASSWORD :'pw';
 \else
     DO $$ BEGIN RAISE EXCEPTION 'APP_DB_PASSWORD must be set and at least 16 characters'; END $$;

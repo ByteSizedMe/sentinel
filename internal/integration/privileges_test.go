@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
@@ -106,6 +107,8 @@ func TestAppRolePrivileges(t *testing.T) {
 		{"DROP TABLE roles", `DROP TABLE roles`},
 		{"CREATE TABLE", `CREATE TABLE public.privileges_test_table (id int)`},
 		{"CREATE INDEX on audit_log", `CREATE INDEX privileges_test_idx ON audit_log (reason)`},
+		{"CREATE FUNCTION", `CREATE FUNCTION public.privileges_test_fn() RETURNS int AS 'SELECT 1' LANGUAGE sql`},
+		{"COPY TO PROGRAM", `COPY (SELECT 1) TO PROGRAM 'true'`},
 		{"SELECT schema_migrations", `SELECT version FROM schema_migrations`},
 		{"UPDATE schema_migrations", `UPDATE schema_migrations SET dirty = true`},
 	}
@@ -122,6 +125,31 @@ func TestAppRolePrivileges(t *testing.T) {
 				t.Fatalf("error = %v, want a permission error (SQLSTATE %s)", err, pgInsufficientPrivilege)
 			}
 		})
+	}
+
+	// Becoming the table owner is refused too.
+	var owner string
+	if err := e.pool.QueryRow(ctx, `SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = 'public.audit_log'::regclass`).Scan(&owner); err != nil {
+		t.Fatal(err)
+	}
+	t.Run("SET ROLE to the owner", func(t *testing.T) {
+		_, err := e.pool.Exec(ctx, `SET ROLE `+pgx.Identifier{owner}.Sanitize())
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != pgInsufficientPrivilege {
+			t.Fatalf("error = %v, want a permission error (SQLSTATE %s)", err, pgInsufficientPrivilege)
+		}
+	})
+
+	// The role has no dangerous attributes.
+	var super, createRole, createDB, replication, bypassRLS bool
+	if err := e.pool.QueryRow(ctx,
+		`SELECT rolsuper, rolcreaterole, rolcreatedb, rolreplication, rolbypassrls FROM pg_roles WHERE rolname = current_user`).
+		Scan(&super, &createRole, &createDB, &replication, &bypassRLS); err != nil {
+		t.Fatal(err)
+	}
+	if super || createRole || createDB || replication || bypassRLS {
+		t.Errorf("role attributes: superuser=%v createrole=%v createdb=%v replication=%v bypassrls=%v; all must be false",
+			super, createRole, createDB, replication, bypassRLS)
 	}
 
 	// A GRANT by a role without grant option is not an error in Postgres (it only
