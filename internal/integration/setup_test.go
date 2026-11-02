@@ -42,9 +42,16 @@ type env struct {
 // configured or not reachable.
 func newEnv(t testing.TB) *env {
 	t.Helper()
-	dbURL, redisURL := os.Getenv("DATABASE_URL"), os.Getenv("REDIS_URL")
+	return newEnvFor(t, "DATABASE_URL")
+}
+
+// newEnvFor is newEnv with the database taken from the named variable, so a
+// test can choose DATABASE_URL (the app role) or APP_DATABASE_URL explicitly.
+func newEnvFor(t testing.TB, dbVar string) *env {
+	t.Helper()
+	dbURL, redisURL := os.Getenv(dbVar), os.Getenv("REDIS_URL")
 	if dbURL == "" || redisURL == "" {
-		t.Skip("DATABASE_URL and REDIS_URL must both be set; skipping integration test")
+		t.Skipf("%s and REDIS_URL must both be set; skipping integration test", dbVar)
 	}
 
 	pool, err := store.Connect(context.Background(), dbURL)

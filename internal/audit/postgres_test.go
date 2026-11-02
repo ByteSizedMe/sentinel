@@ -12,7 +12,9 @@ import (
 )
 
 // These tests need a real, migrated Postgres (make up, make migrate-up) and
-// skip when DATABASE_URL is unset or unreachable.
+// skip when DATABASE_URL is unset or unreachable. DATABASE_URL is the
+// low-privilege app role; the trigger test below also needs the owner
+// connection (MIGRATE_DATABASE_URL, or DATABASE_URL if that is unset).
 //
 // NOTE: the audit log is append-only, so the rows these tests insert can never
 // be deleted. They are tagged caller = "audit-test" and are harmless;
@@ -20,7 +22,23 @@ import (
 
 func testPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	url := os.Getenv("DATABASE_URL")
+	return connect(t, os.Getenv("DATABASE_URL"))
+}
+
+// ownerPool connects as the database owner. Only the owner (and superusers)
+// reach the append-only triggers; the app role is stopped earlier, by a
+// missing privilege (see internal/integration).
+func ownerPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	url := os.Getenv("MIGRATE_DATABASE_URL")
+	if url == "" {
+		url = os.Getenv("DATABASE_URL")
+	}
+	return connect(t, url)
+}
+
+func connect(t *testing.T, url string) *pgxpool.Pool {
+	t.Helper()
 	if url == "" {
 		t.Skip("DATABASE_URL not set; skipping Postgres tests")
 	}
@@ -60,7 +78,9 @@ func TestPostgresRecordAndAppendOnly(t *testing.T) {
 		t.Errorf("stored row = %q %q %q %v %q %q", caller, action, resource, allowed, reason, source)
 	}
 
-	// 2. The database itself rejects changes, whatever the application does.
+	// 2. Even the owner cannot change a row: the triggers reject it, whatever
+	// the application does.
+	owner := ownerPool(t)
 	tests := []struct {
 		name string
 		sql  string
@@ -74,7 +94,7 @@ func TestPostgresRecordAndAppendOnly(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := pool.Exec(ctx, tt.sql, tt.args...)
+			_, err := owner.Exec(ctx, tt.sql, tt.args...)
 			if err == nil {
 				t.Fatal("statement succeeded; audit_log must be append-only")
 			}

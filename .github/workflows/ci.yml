@@ -39,8 +39,13 @@ jobs:
           --health-retries 10
 
     # Dummy values for CI only. None of them is a real credential.
+    # MIGRATE_DATABASE_URL is the database owner (used for migrations); the tests
+    # run as the low-privilege sentinel_app role through DATABASE_URL.
     env:
-      DATABASE_URL: postgres://ci_user:ci-only-dummy-password@localhost:5432/sentinel_ci?sslmode=disable
+      MIGRATE_DATABASE_URL: postgres://ci_user:ci-only-dummy-password@localhost:5432/sentinel_ci?sslmode=disable
+      DATABASE_URL: postgres://sentinel_app:ci-only-dummy-app-password@localhost:5432/sentinel_ci?sslmode=disable
+      APP_DATABASE_URL: postgres://sentinel_app:ci-only-dummy-app-password@localhost:5432/sentinel_ci?sslmode=disable
+      APP_DB_PASSWORD: ci-only-dummy-app-password
       REDIS_URL: redis://localhost:6379/0
       JWT_SECRET: ci-dummy-jwt-secret-not-real-0123456789
       JWT_ISSUER: sentinel-ci
@@ -69,6 +74,11 @@ jobs:
       - name: Apply migrations
         run: go run ./cmd/migrate up
 
+      # The password reaches psql through the environment and the SQL through
+      # standard input, never on the command line.
+      - name: Create app role login
+        run: psql "$MIGRATE_DATABASE_URL" -q < scripts/set_app_role_password.sql
+
       - name: Unit tests (race detector)
         run: go test -race -count=1 ./...
 
@@ -84,3 +94,6 @@ jobs:
         run: |
           go install github.com/securego/gosec/v2/cmd/gosec@v2.30.0
           gosec ./...
+
+      - name: Build container image
+        run: docker build -t sentinel:ci .

@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/bytesizedme/sentinel/internal/clientip"
 )
 
 // MinJWTSecretLen is the shortest JWT_SECRET we accept (in bytes). HS256 uses
@@ -53,6 +55,10 @@ type Config struct {
 
 	RateLimit RateLimit
 
+	// TrustedProxies are the proxies whose X-Forwarded-For header the per-IP rate
+	// limiter believes. Nil (the default) trusts nobody.
+	TrustedProxies *clientip.Trusted
+
 	JWTSecret   string // HS256 signing key (secret: never log it)
 	JWTIssuer   string // required "iss" claim value
 	JWTAudience string // required "aud" claim value
@@ -70,6 +76,10 @@ var (
 	// ErrInvalidRateLimit is wrapped with the name of the offending variable.
 	// The message never includes the value that was set.
 	ErrInvalidRateLimit = errors.New("config: invalid rate limit setting")
+
+	// ErrInvalidTrustedProxies wraps the reason from clientip.Parse. The message
+	// never includes the list that was set.
+	ErrInvalidTrustedProxies = errors.New("config: invalid TRUSTED_PROXIES")
 )
 
 // Load builds a Config using getenv to read variables. Passing the lookup
@@ -84,15 +94,20 @@ func Load(getenv func(string) string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	proxies, err := clientip.Parse(getenv("TRUSTED_PROXIES"))
+	if err != nil {
+		return Config{}, fmt.Errorf("%w: %w", ErrInvalidTrustedProxies, err)
+	}
 	cfg := Config{
-		RateLimit:   limits,
-		Addr:        valueOr(getenv("SENTINEL_ADDR"), ":8080"),
-		DatabaseURL: strings.TrimSpace(getenv("DATABASE_URL")),
-		RedisURL:    valueOr(getenv("REDIS_URL"), "redis://localhost:6379/0"),
-		CacheTTL:    ttl,
-		JWTSecret:   strings.TrimSpace(getenv("JWT_SECRET")),
-		JWTIssuer:   strings.TrimSpace(getenv("JWT_ISSUER")),
-		JWTAudience: strings.TrimSpace(getenv("JWT_AUDIENCE")),
+		RateLimit:      limits,
+		TrustedProxies: proxies,
+		Addr:           valueOr(getenv("SENTINEL_ADDR"), ":8080"),
+		DatabaseURL:    strings.TrimSpace(getenv("DATABASE_URL")),
+		RedisURL:       valueOr(getenv("REDIS_URL"), "redis://localhost:6379/0"),
+		CacheTTL:       ttl,
+		JWTSecret:      strings.TrimSpace(getenv("JWT_SECRET")),
+		JWTIssuer:      strings.TrimSpace(getenv("JWT_ISSUER")),
+		JWTAudience:    strings.TrimSpace(getenv("JWT_AUDIENCE")),
 	}
 
 	// None of these have a default on purpose: silently falling back to some
