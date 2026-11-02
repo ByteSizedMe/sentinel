@@ -45,18 +45,33 @@ func newEnv(t testing.TB) *env {
 	return newEnvFor(t, "DATABASE_URL")
 }
 
+// inCI reports whether the tests run in CI (GitHub Actions sets CI=true).
+func inCI() bool { return os.Getenv("CI") == "true" }
+
+// skipOrFail ends the test because something it needs is missing. Locally that
+// is a skip with a clear message, so `go test` works without Docker. In CI a
+// skip would let a broken setup (for example the app-role login not working)
+// pass unnoticed, so there it is a failure.
+func skipOrFail(t testing.TB, format string, args ...any) {
+	t.Helper()
+	if inCI() {
+		t.Fatalf("CI is set, so this test must not be skipped: "+format, args...)
+	}
+	t.Skipf(format+"; skipping", args...)
+}
+
 // newEnvFor is newEnv with the database taken from the named variable, so a
 // test can choose DATABASE_URL (the app role) or APP_DATABASE_URL explicitly.
 func newEnvFor(t testing.TB, dbVar string) *env {
 	t.Helper()
 	dbURL, redisURL := os.Getenv(dbVar), os.Getenv("REDIS_URL")
 	if dbURL == "" || redisURL == "" {
-		t.Skipf("%s and REDIS_URL must both be set; skipping integration test", dbVar)
+		skipOrFail(t, "%s and REDIS_URL must both be set", dbVar)
 	}
 
 	pool, err := store.Connect(context.Background(), dbURL)
 	if err != nil {
-		t.Skipf("Postgres not reachable (%v); skipping", err)
+		skipOrFail(t, "Postgres not reachable (%v)", err)
 	}
 	t.Cleanup(pool.Close)
 
@@ -68,7 +83,7 @@ func newEnvFor(t testing.TB, dbVar string) *env {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if err := client.Ping(ctx).Err(); err != nil {
-		t.Skipf("Redis not reachable (%v); skipping", err)
+		skipOrFail(t, "Redis not reachable (%v)", err)
 	}
 
 	return &env{pool: pool, redis: client, pg: store.NewPostgres(pool)}
